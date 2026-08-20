@@ -10,8 +10,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFormLayout,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -128,10 +130,19 @@ class MainWindow(QMainWindow):
         crop_grid.addWidget(self.crop_bottom, 1, 3)
         layout.addLayout(crop_grid)
 
+        self.remove_audio = QCheckBox("Remove audio")
+        layout.addWidget(self.remove_audio)
+
+        button_row = QHBoxLayout()
         self.cut_button = QPushButton("Cut")
         self.cut_button.clicked.connect(self.do_cut)
         self.cut_button.setEnabled(False)
-        layout.addWidget(self.cut_button)
+        button_row.addWidget(self.cut_button)
+
+        self.done_button = QPushButton("Done")
+        self.done_button.clicked.connect(self.close)
+        button_row.addWidget(self.done_button)
+        layout.addLayout(button_row)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -196,12 +207,16 @@ class MainWindow(QMainWindow):
 
         out_path = next_available(self.path.with_name(f"{self.path.stem}_cut{self.path.suffix}"))
 
+        no_audio = self.remove_audio.isChecked()
+
         cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
         if has_crop:
             cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
-                    "-c:v", "libx264", "-crf", "17", "-preset", "veryfast", "-c:a", "copy"]
+                    "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
+            cmd += ["-an"] if no_audio else ["-c:a", "copy"]
         else:
-            cmd += ["-c", "copy"]
+            cmd += ["-c:v", "copy"]
+            cmd += ["-an"] if no_audio else ["-c:a", "copy"]
         cmd.append(str(out_path))
 
         self.status.setText("Cutting...")
