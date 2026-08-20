@@ -229,6 +229,7 @@ class VideoPreview(QGraphicsView):
         self.player = QMediaPlayer(self)
         self.player.setLoops(QMediaPlayer.Infinite)
         self.audio_output = QAudioOutput(self)
+        self.audio_output.setMuted(True)
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.video_item)
         self.player.errorOccurred.connect(self.on_player_error)
@@ -277,7 +278,10 @@ class VideoPreview(QGraphicsView):
         self.fallback_item.hide()
         self.video_item.show()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
+        # Not autoplaying (starts paused), but briefly play+pause so the first frame
+        # actually renders instead of leaving the preview black until Play is pressed.
         self.player.play()
+        self.player.pause()
         for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
             g.show()
         for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
@@ -531,7 +535,7 @@ class MainWindow(QMainWindow):
         self.play_button.setEnabled(False)
         controls_row.addWidget(self.play_button)
 
-        self.mute_button = QPushButton("Mute")
+        self.mute_button = QPushButton("Unmute")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setEnabled(False)
         controls_row.addWidget(self.mute_button)
@@ -539,6 +543,17 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("0:00 / 0:00")
         controls_row.addWidget(self.time_label)
         controls_row.addStretch()
+
+        self.set_start_button = QPushButton("Set Start")
+        self.set_start_button.clicked.connect(self.set_start_from_playhead)
+        self.set_start_button.setEnabled(False)
+        controls_row.addWidget(self.set_start_button)
+
+        self.set_end_button = QPushButton("Set End")
+        self.set_end_button.clicked.connect(self.set_end_from_playhead)
+        self.set_end_button.setEnabled(False)
+        controls_row.addWidget(self.set_end_button)
+
         below_preview.addLayout(controls_row)
 
         left.addLayout(below_preview)
@@ -714,6 +729,8 @@ class MainWindow(QMainWindow):
         self.play_button.setEnabled(True)
         self.mute_button.setEnabled(True)
         self.remove_file_button.setEnabled(True)
+        self.set_start_button.setEnabled(True)
+        self.set_end_button.setEnabled(True)
         self.status.setText("")
         self.update_suffix_placeholder()
 
@@ -736,6 +753,8 @@ class MainWindow(QMainWindow):
         self.play_button.setEnabled(False)
         self.mute_button.setEnabled(False)
         self.remove_file_button.setEnabled(False)
+        self.set_start_button.setEnabled(False)
+        self.set_end_button.setEnabled(False)
         self.status.setText("")
         self.update_suffix_placeholder()
 
@@ -813,6 +832,18 @@ class MainWindow(QMainWindow):
         muted = not self.preview.audio_output.isMuted()
         self.preview.audio_output.setMuted(muted)
         self.mute_button.setText("Unmute" if muted else "Mute")
+
+    def set_start_from_playhead(self):
+        h, m, s = seconds_to_hms(self.scrubber.position)
+        self.start_h.setText(str(h))
+        self.start_m.setText(str(m))
+        self.start_s.setText(str(s))
+
+    def set_end_from_playhead(self):
+        h, m, s = seconds_to_hms((self.duration or 0) - self.scrubber.position)
+        self.end_h.setText(str(h))
+        self.end_m.setText(str(m))
+        self.end_s.setText(str(s))
 
     def on_playback_state_changed(self, state):
         self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
