@@ -63,7 +63,7 @@ class DropLabel(QLabel):
         self.setAcceptDrops(True)
         self.setMinimumHeight(80)
         self.setStyleSheet(
-            "QLabel { border: 2px dashed palette(placeholdertext); border-radius: 6px; padding: 8px; }"
+            "QLabel { border: 2px dashed #999999; border-radius: 6px; padding: 8px; }"
         )
 
     def dragEnterEvent(self, event):
