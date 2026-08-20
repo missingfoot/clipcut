@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ClipCut: quick drag-and-drop trim/crop tool that preserves source mtime."""
 
+import bisect
 import json
 import os
 import subprocess
@@ -52,6 +53,25 @@ def probe(path):
     num, _, den = stream["avg_frame_rate"].partition("/")
     fps = int(num) / int(den) if int(den or 0) else 30.0
     return int(stream["width"]), int(stream["height"]), duration, fps
+
+
+def get_keyframe_times(path):
+    """Sorted list of keyframe timestamps - where a stream-copy cut's start actually lands."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    times = []
+    for line in out.stdout.splitlines():
+        pts_time, _, flags = line.partition(",")
+        if flags.startswith("K"):
+            try:
+                times.append(float(pts_time))
+            except ValueError:
+                pass
+    times.sort()
+    return times
 
 
 def grab_thumbnail(path):
@@ -122,6 +142,22 @@ def make_time_row(label_text):
     row.addWidget(QLabel("s"))
     row.addStretch()
     return row, h_edit, m_edit, s_edit
+
+
+def make_frame_row(label_text):
+    row = QHBoxLayout()
+    label = QLabel(label_text)
+    label.setFixedWidth(40)
+    row.addWidget(label)
+    frame_edit = NumberLineEdit()
+    frame_edit.setPlaceholderText("0")
+    frame_edit.setMaximumWidth(60)
+    row.addWidget(frame_edit)
+    ref_label = QLabel("(0:00)")
+    ref_label.setStyleSheet("color: #999999;")
+    row.addWidget(ref_label)
+    row.addStretch()
+    return row, frame_edit, ref_label
 
 
 def make_heading(text):
@@ -509,6 +545,7 @@ class MainWindow(QMainWindow):
         self.video_height = None
         self.duration = None
         self.video_fps = None
+        self.keyframe_times = []
         self.process = None
         self.progress_target_duration = 0
         self.progress_buffer = ""
@@ -615,21 +652,46 @@ class MainWindow(QMainWindow):
 
         sidebar.addWidget(make_separator())
         sidebar.addWidget(make_heading("Cut"))
-        start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
-        sidebar.addLayout(start_row)
-        end_row, self.end_h, self.end_m, self.end_s = make_time_row("End:")
-        sidebar.addLayout(end_row)
-        self.time_edits = (self.start_h, self.start_m, self.start_s,
-                            self.end_h, self.end_m, self.end_s)
 
         self.frame_accurate = QCheckBox("Frame-accurate cut")
-        self.frame_accurate.toggled.connect(self.update_suffix_placeholder)
         sidebar.addWidget(self.frame_accurate)
-        frame_accurate_note = QLabel("Frame-accurate cutting requires re-encode (not fully lossless)")
+        frame_accurate_note = QLabel(
+            "Frame-accurate cutting requires re-encode (not fully lossless). "
+            "Start/End switch to frame numbers, driven from the timeline."
+        )
         frame_accurate_note.setStyleSheet("color: #999999; font-size: 10px;")
         frame_accurate_note.setAlignment(Qt.AlignLeft)
         frame_accurate_note.setWordWrap(True)
         sidebar.addWidget(frame_accurate_note)
+
+        start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
+        self.time_start_widget = QWidget()
+        self.time_start_widget.setLayout(start_row)
+        sidebar.addWidget(self.time_start_widget)
+
+        end_row, self.end_h, self.end_m, self.end_s = make_time_row("End:")
+        self.time_end_widget = QWidget()
+        self.time_end_widget.setLayout(end_row)
+        sidebar.addWidget(self.time_end_widget)
+
+        self.time_edits = (self.start_h, self.start_m, self.start_s,
+                            self.end_h, self.end_m, self.end_s)
+
+        start_frame_row, self.start_frame_edit, self.start_frame_ref = make_frame_row("Start:")
+        self.frame_start_widget = QWidget()
+        self.frame_start_widget.setLayout(start_frame_row)
+        self.frame_start_widget.hide()
+        sidebar.addWidget(self.frame_start_widget)
+
+        end_frame_row, self.end_frame_edit, self.end_frame_ref = make_frame_row("End:")
+        self.frame_end_widget = QWidget()
+        self.frame_end_widget.setLayout(end_frame_row)
+        self.frame_end_widget.hide()
+        sidebar.addWidget(self.frame_end_widget)
+
+        self.frame_edits = (self.start_frame_edit, self.end_frame_edit)
+
+        self.frame_accurate.toggled.connect(self.on_frame_accurate_toggled)
 
         sidebar.addWidget(make_separator())
         sidebar.addWidget(make_heading("Crop"))
@@ -676,6 +738,8 @@ class MainWindow(QMainWindow):
         self.audio_only.toggled.connect(self.on_audio_only_toggled)
         for widget in self.time_edits:
             widget.textChanged.connect(self.on_time_fields_changed)
+        for widget in self.frame_edits:
+            widget.textChanged.connect(self.on_frame_fields_changed)
         for widget in self.crop_edits:
             widget.textChanged.connect(self.on_crop_fields_changed)
         self.remove_audio.toggled.connect(self.update_suffix_placeholder)
@@ -758,9 +822,12 @@ class MainWindow(QMainWindow):
         self.video_width, self.video_height = w, h
         self.duration = duration
         self.video_fps = fps
+        self.keyframe_times = get_keyframe_times(path)
         self.filename_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
         self.browse_button.setText("Replace File...")
         for field in self.time_edits:
+            field.clear()
+        for field in self.frame_edits:
             field.clear()
         for field in self.crop_edits:
             field.clear()
@@ -785,9 +852,12 @@ class MainWindow(QMainWindow):
         self.video_height = None
         self.duration = None
         self.video_fps = None
+        self.keyframe_times = []
         self.filename_label.setText("Drag and drop or choose a file")
         self.browse_button.setText("Browse...")
         for field in self.time_edits:
+            field.clear()
+        for field in self.frame_edits:
             field.clear()
         for field in self.crop_edits:
             field.clear()
@@ -849,20 +919,84 @@ class MainWindow(QMainWindow):
         self.scrubber.set_trim(start, end)
         self._syncing = False
 
+    def on_frame_fields_changed(self):
+        fps = self.video_fps or 30.0
+        self.start_frame_ref.setText(f"({format_time(int(self.start_frame_edit.text() or 0) / fps)})")
+        self.end_frame_ref.setText(f"({format_time(int(self.end_frame_edit.text() or 0) / fps)})")
+        self.update_suffix_placeholder()
+        if self._syncing or not self.path:
+            return
+        try:
+            start, end = self.get_trim_times()
+        except ValueError:
+            return
+        self._syncing = True
+        self.scrubber.set_trim(start, end)
+        self._syncing = False
+
+    def on_frame_accurate_toggled(self, checked):
+        self.time_start_widget.setVisible(not checked)
+        self.time_end_widget.setVisible(not checked)
+        self.frame_start_widget.setVisible(checked)
+        self.frame_end_widget.setVisible(checked)
+        if self.path:
+            try:
+                # Read from the mode we're leaving (checked already reflects the new
+                # state by the time this handler fires, so get_trim_times() would read
+                # the wrong, not-yet-populated field set).
+                start, end = self.read_time_fields_seconds() if checked else self.read_frame_fields_seconds()
+            except ValueError:
+                start, end = 0.0, self.duration
+            self._syncing = True
+            if checked:
+                fps = self.video_fps or 30.0
+                self.start_frame_edit.setText(str(round(start * fps)))
+                self.end_frame_edit.setText(str(round(end * fps)))
+            else:
+                h, m, s = seconds_to_hms(start)
+                self.start_h.setText(str(h))
+                self.start_m.setText(str(m))
+                self.start_s.setText(str(s))
+                h, m, s = seconds_to_hms(self.duration - end)
+                self.end_h.setText(str(h))
+                self.end_m.setText(str(m))
+                self.end_s.setText(str(s))
+            self._syncing = False
+        self.update_suffix_placeholder()
+
     def on_trim_changed(self, start, end):
         if self._syncing:
             return
+        start = self.snap_time(start, is_start=True)
+        end = self.snap_time(end, is_start=False)
         self._syncing = True
-        h, m, s = seconds_to_hms(start)
-        self.start_h.setText(str(h))
-        self.start_m.setText(str(m))
-        self.start_s.setText(str(s))
-        h, m, s = seconds_to_hms(self.duration - end)
-        self.end_h.setText(str(h))
-        self.end_m.setText(str(m))
-        self.end_s.setText(str(s))
+        if self.frame_accurate.isChecked():
+            fps = self.video_fps or 30.0
+            self.start_frame_edit.setText(str(round(start * fps)))
+            self.end_frame_edit.setText(str(round(end * fps)))
+        else:
+            h, m, s = seconds_to_hms(start)
+            self.start_h.setText(str(h))
+            self.start_m.setText(str(m))
+            self.start_s.setText(str(s))
+            h, m, s = seconds_to_hms(self.duration - end)
+            self.end_h.setText(str(h))
+            self.end_m.setText(str(m))
+            self.end_s.setText(str(s))
         self._syncing = False
         self.update_suffix_placeholder()
+
+    def snap_time(self, t, is_start):
+        """Snap a trim timestamp to what it'll actually land on: an exact frame when
+        Frame-accurate cut is on, otherwise the nearest keyframe at-or-before (start
+        only - a stream-copy end doesn't need keyframe alignment)."""
+        if self.frame_accurate.isChecked():
+            fps = self.video_fps or 30.0
+            return round(t * fps) / fps
+        if is_start and self.keyframe_times:
+            idx = bisect.bisect_right(self.keyframe_times, t) - 1
+            return self.keyframe_times[max(0, idx)]
+        return t
 
     # --- playback controls ---
 
@@ -889,13 +1023,23 @@ class MainWindow(QMainWindow):
         self.mute_button.setText("Unmute" if muted else "Mute")
 
     def set_start_from_playhead(self):
-        h, m, s = seconds_to_hms(self.scrubber.position)
+        snapped = self.snap_time(self.scrubber.position, is_start=True)
+        if self.frame_accurate.isChecked():
+            fps = self.video_fps or 30.0
+            self.start_frame_edit.setText(str(round(snapped * fps)))
+            return
+        h, m, s = seconds_to_hms(snapped)
         self.start_h.setText(str(h))
         self.start_m.setText(str(m))
         self.start_s.setText(str(s))
 
     def set_end_from_playhead(self):
-        h, m, s = seconds_to_hms((self.duration or 0) - self.scrubber.position)
+        snapped = self.snap_time(self.scrubber.position, is_start=False)
+        if self.frame_accurate.isChecked():
+            fps = self.video_fps or 30.0
+            self.end_frame_edit.setText(str(round(snapped * fps)))
+            return
+        h, m, s = seconds_to_hms((self.duration or 0) - snapped)
         self.end_h.setText(str(h))
         self.end_m.setText(str(m))
         self.end_s.setText(str(s))
@@ -930,7 +1074,19 @@ class MainWindow(QMainWindow):
             raise ValueError("time fields must be >= 0")
         return h * 3600 + m * 60 + s
 
-    def get_trim_times(self):
+    def read_frame_fields_seconds(self):
+        fps = self.video_fps or 30.0
+        start_frame = int(self.start_frame_edit.text() or 0)
+        end_frame = int(self.end_frame_edit.text() or 0)
+        if start_frame < 0 or end_frame < 0:
+            raise ValueError("frame numbers must be >= 0")
+        start = start_frame / fps
+        end = end_frame / fps
+        if not (0 <= start < end <= self.duration + 0.01):
+            raise ValueError("frame range leaves nothing to cut")
+        return start, end
+
+    def read_time_fields_seconds(self):
         chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
         chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
         start = chop_start
@@ -938,6 +1094,11 @@ class MainWindow(QMainWindow):
         if not (0 <= start < end <= self.duration + 0.01):
             raise ValueError("chop amounts leave nothing to cut")
         return start, end
+
+    def get_trim_times(self):
+        if self.frame_accurate.isChecked():
+            return self.read_frame_fields_seconds()
+        return self.read_time_fields_seconds()
 
     def get_crop(self):
         left, top, right, bottom = (int(edit.text() or 0) for edit in self.crop_edits)
@@ -956,9 +1117,13 @@ class MainWindow(QMainWindow):
         if self.audio_only.isChecked():
             return "audio_only"
         try:
-            chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
-            chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
-            trimmed = chop_start > 0 or chop_end > 0
+            if self.frame_accurate.isChecked():
+                start, end = self.get_trim_times()
+                trimmed = start > 0 or end < (self.duration or 0)
+            else:
+                chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
+                chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
+                trimmed = chop_start > 0 or chop_end > 0
         except ValueError:
             trimmed = False
         try:
