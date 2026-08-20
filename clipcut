@@ -1014,18 +1014,27 @@ class MainWindow(QMainWindow):
         idx = bisect.bisect_right(self.keyframe_times, t)
         return self.keyframe_times[min(len(self.keyframe_times) - 1, idx)]
 
+    def current_position(self):
+        """The player's actual current position, in seconds. Reads the player directly
+        rather than self.scrubber.position, which only updates when positionChanged
+        arrives asynchronously - clicking a step/set button again before that signal
+        lands would otherwise compute from a stale, pre-seek position."""
+        return self.preview.player.position() / 1000.0
+
     def step_back(self):
+        pos = self.current_position()
         if self.frame_mode:
-            new_pos = max(0.0, self.scrubber.position - self.frame_duration())
+            new_pos = max(0.0, pos - self.frame_duration())
         else:
-            new_pos = self.prev_keyframe_time(self.scrubber.position)
+            new_pos = self.prev_keyframe_time(pos)
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def step_forward(self):
+        pos = self.current_position()
         if self.frame_mode:
-            new_pos = min(self.duration or 0.0, self.scrubber.position + self.frame_duration())
+            new_pos = min(self.duration or 0.0, pos + self.frame_duration())
         else:
-            new_pos = self.next_keyframe_time(self.scrubber.position)
+            new_pos = self.next_keyframe_time(pos)
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def toggle_mute(self):
@@ -1034,18 +1043,20 @@ class MainWindow(QMainWindow):
         self.mute_button.setText("Unmute" if muted else "Mute")
 
     def set_start_from_playhead(self):
+        pos = self.current_position()
         if self.frame_mode:
             fps = self.video_fps or 30.0
-            self.start_frame_edit.setText(str(round(self.scrubber.position * fps)))
+            self.start_frame_edit.setText(str(round(pos * fps)))
         else:
-            self.start_keyframe_edit.setText(str(self.keyframe_index_of(self.scrubber.position)))
+            self.start_keyframe_edit.setText(str(self.keyframe_index_of(pos)))
 
     def set_end_from_playhead(self):
+        pos = self.current_position()
         if self.frame_mode:
             fps = self.video_fps or 30.0
-            self.end_frame_edit.setText(str(round(self.scrubber.position * fps)))
+            self.end_frame_edit.setText(str(round(pos * fps)))
         else:
-            self.end_keyframe_edit.setText(str(self.keyframe_index_of(self.scrubber.position)))
+            self.end_keyframe_edit.setText(str(self.keyframe_index_of(pos)))
 
     def on_playback_state_changed(self, state):
         self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
