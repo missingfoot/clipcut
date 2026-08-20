@@ -43,19 +43,6 @@ def probe(path):
     return int(stream["width"]), int(stream["height"]), duration
 
 
-def parse_time(text):
-    text = text.strip()
-    if not text:
-        return None
-    if ":" in text:
-        parts = [float(p) for p in text.split(":")]
-        while len(parts) < 3:
-            parts.insert(0, 0.0)
-        h, m, s = parts
-        return h * 3600 + m * 60 + s
-    return float(text)
-
-
 def next_available(path):
     if not path.exists():
         return path
@@ -106,14 +93,31 @@ class MainWindow(QMainWindow):
         self.drop = DropLabel(self.load_file)
         layout.addWidget(self.drop)
 
-        form = QFormLayout()
-        self.start_edit = QLineEdit()
-        self.start_edit.setPlaceholderText("0")
-        self.end_edit = QLineEdit()
-        self.end_edit.setPlaceholderText("0")
-        form.addRow("Chop off start (secs):", self.start_edit)
-        form.addRow("Chop off end (secs):", self.end_edit)
-        layout.addLayout(form)
+        def time_row(label_text):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label_text))
+            h_edit = QLineEdit()
+            h_edit.setPlaceholderText("0")
+            h_edit.setMaximumWidth(40)
+            m_edit = QLineEdit()
+            m_edit.setPlaceholderText("0")
+            m_edit.setMaximumWidth(40)
+            s_edit = QLineEdit()
+            s_edit.setPlaceholderText("0")
+            s_edit.setMaximumWidth(40)
+            row.addWidget(h_edit)
+            row.addWidget(QLabel("h"))
+            row.addWidget(m_edit)
+            row.addWidget(QLabel("m"))
+            row.addWidget(s_edit)
+            row.addWidget(QLabel("s"))
+            row.addStretch()
+            return row, h_edit, m_edit, s_edit
+
+        start_row, self.start_h, self.start_m, self.start_s = time_row("Chop off start:")
+        layout.addLayout(start_row)
+        end_row, self.end_h, self.end_m, self.end_s = time_row("Chop off end:")
+        layout.addLayout(end_row)
 
         def crop_group(label_text, edit):
             group = QWidget()
@@ -188,17 +192,24 @@ class MainWindow(QMainWindow):
         self.width, self.height = w, h
         self.duration = duration
         self.drop.setText(f"{path.name}\n{w}x{h}, {duration:.1f}s")
-        self.start_edit.clear()
-        self.end_edit.clear()
+        for field in (self.start_h, self.start_m, self.start_s, self.end_h, self.end_m, self.end_s):
+            field.clear()
         self.cut_button.setEnabled(True)
         self.status.setText("")
 
+    @staticmethod
+    def hms_to_seconds(h_edit, m_edit, s_edit):
+        h = int(h_edit.text() or 0)
+        m = int(m_edit.text() or 0)
+        s = int(s_edit.text() or 0)
+        if h < 0 or m < 0 or s < 0:
+            raise ValueError("time fields must be >= 0")
+        return h * 3600 + m * 60 + s
+
     def build_command(self):
         """Return (cmd, out_path). Raises ValueError on bad input."""
-        chop_start = parse_time(self.start_edit.text()) or 0.0
-        chop_end = parse_time(self.end_edit.text()) or 0.0
-        if chop_start < 0 or chop_end < 0:
-            raise ValueError("chop amounts must be >= 0")
+        chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
+        chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
         start = chop_start
         end = self.duration - chop_end
         if not (0 <= start < end <= self.duration + 0.01):
