@@ -771,11 +771,6 @@ class MainWindow(QMainWindow):
         self.section_tabs = QTabWidget()
         self.section_tabs.setDocumentMode(True)
         self.section_tabs.tabBar().setExpanding(True)
-        # Only the active tab's left/right side borders - leave top/bottom alone so
-        # its connection to the content below and the general tab shape are untouched.
-        self.section_tabs.setStyleSheet(
-            "QTabBar::tab:selected { border-left: none; border-right: none; }"
-        )
         self.section_tabs.addTab(cut_tab_page, "Cut")
         self.section_tabs.addTab(crop_tab_page, "Crop")
         self.section_tabs.addTab(audio_tab_page, "Audio")
