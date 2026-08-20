@@ -515,11 +515,15 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
         self.drop_overlay = DropOverlay(self.load_file, central)
 
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(4)
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
         left.addWidget(self.preview, stretch=1)
@@ -549,6 +553,7 @@ class MainWindow(QMainWindow):
 
         # --- right column: existing sidebar controls ---
         sidebar = QVBoxLayout()
+        sidebar.setContentsMargins(12, 12, 12, 12)
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setFixedWidth(280)
