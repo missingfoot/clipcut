@@ -658,7 +658,6 @@ class MainWindow(QMainWindow):
         sidebar.addLayout(file_button_row)
 
         sidebar_hr()
-        sidebar = new_sidebar_section()
 
         self.frame_mode = False
 
@@ -765,13 +764,19 @@ class MainWindow(QMainWindow):
         audio_tab_layout.addWidget(self.audio_only)
         audio_tab_layout.addStretch()
 
-        # Outer Cut/Crop/Audio tabs - left Expanding (default) so this fills the
-        # space between the fixed file area above and the fixed Export footer below.
+        # Outer Cut/Crop/Audio tabs - added directly to sidebar_outer (not a padded
+        # section) so the tab bar spans the full sidebar width edge-to-edge, KDE
+        # System-Settings style. documentMode drops the bordered content pane; the
+        # tab bar's own expanding behaviour makes each tab share the width evenly.
+        # Left Expanding (default) vertically so this fills the space between the
+        # fixed file area above and the fixed Export footer below.
         self.section_tabs = QTabWidget()
+        self.section_tabs.setDocumentMode(True)
+        self.section_tabs.tabBar().setExpanding(True)
         self.section_tabs.addTab(cut_tab_page, "Cut")
         self.section_tabs.addTab(crop_tab_page, "Crop")
         self.section_tabs.addTab(audio_tab_page, "Audio")
-        sidebar.addWidget(self.section_tabs)
+        sidebar_outer.addWidget(self.section_tabs)
 
         sidebar_hr()
         sidebar = new_sidebar_section()
