@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(crop_grid)
         crop_note = QLabel("Cropping requires re-encode (not fully lossless)")
         crop_note.setStyleSheet("color: #999999; font-size: 10px;")
-        crop_note.setAlignment(Qt.AlignCenter)
+        crop_note.setAlignment(Qt.AlignLeft)
         layout.addWidget(crop_note)
         layout.addWidget(separator())
         layout.addWidget(heading("Options"))
@@ -186,6 +186,11 @@ class MainWindow(QMainWindow):
         self.cut_button.clicked.connect(self.do_cut)
         self.cut_button.setEnabled(False)
         button_row.addWidget(self.cut_button)
+
+        self.audio_button = QPushButton("Extract Audio")
+        self.audio_button.clicked.connect(self.do_extract_audio)
+        self.audio_button.setEnabled(False)
+        button_row.addWidget(self.audio_button)
 
         self.done_button = QPushButton("Done")
         self.done_button.clicked.connect(self.close)
@@ -223,6 +228,7 @@ class MainWindow(QMainWindow):
         for field in (self.start_h, self.start_m, self.start_s, self.end_h, self.end_m, self.end_s):
             field.clear()
         self.cut_button.setEnabled(True)
+        self.audio_button.setEnabled(True)
         self.status.setText("")
 
     @staticmethod
@@ -234,14 +240,26 @@ class MainWindow(QMainWindow):
             raise ValueError("time fields must be >= 0")
         return h * 3600 + m * 60 + s
 
-    def build_command(self):
-        """Return (cmd, out_path). Raises ValueError on bad input."""
+    def get_trim_times(self):
         chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
         chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
         start = chop_start
         end = self.duration - chop_end
         if not (0 <= start < end <= self.duration + 0.01):
             raise ValueError("chop amounts leave nothing to cut")
+        return start, end
+
+    def build_audio_command(self):
+        """Return (cmd, out_path) for audio-only extraction. Raises ValueError on bad input."""
+        start, end = self.get_trim_times()
+        out_path = next_available(self.path.with_name(f"{self.path.stem}_audio.m4a"))
+        cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end),
+               "-vn", "-c:a", "copy", str(out_path)]
+        return cmd, out_path
+
+    def build_command(self):
+        """Return (cmd, out_path). Raises ValueError on bad input."""
+        start, end = self.get_trim_times()
 
         left = int(self.crop_left.text() or 0)
         top = int(self.crop_top.text() or 0)
@@ -271,19 +289,15 @@ class MainWindow(QMainWindow):
         cmd.append(str(out_path))
         return cmd, out_path
 
-    def do_cut(self):
-        try:
-            cmd, out_path = self.build_command()
-        except ValueError as e:
-            self.status.setText(f"Invalid input: {e}")
-            return
-
-        self.status.setText("Cutting...")
+    def run_ffmpeg(self, cmd, out_path):
+        self.status.setText("Working...")
         self.cut_button.setEnabled(False)
+        self.audio_button.setEnabled(False)
         QApplication.processEvents()
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         self.cut_button.setEnabled(True)
+        self.audio_button.setEnabled(True)
 
         if result.returncode != 0:
             self.status.setText(f"ffmpeg failed:\n{result.stderr[-500:]}")
@@ -292,6 +306,22 @@ class MainWindow(QMainWindow):
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
         self.status.setText(f"Saved: {out_path.name}")
+
+    def do_cut(self):
+        try:
+            cmd, out_path = self.build_command()
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            return
+        self.run_ffmpeg(cmd, out_path)
+
+    def do_extract_audio(self):
+        try:
+            cmd, out_path = self.build_audio_command()
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            return
+        self.run_ffmpeg(cmd, out_path)
 
 
 def main():
