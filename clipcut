@@ -284,6 +284,21 @@ class VideoPreview(QGraphicsView):
             s.show()
         self.refresh_overlay()
 
+    def unload(self):
+        self.video_width = None
+        self.video_height = None
+        self.crop = (0, 0, 0, 0)
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.video_item.hide()
+        self.fallback_item.hide()
+        self.fallback_item.setPixmap(QPixmap())
+        for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
+            g.hide()
+        for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
+            s.hide()
+        self.hint_item.show()
+
     def on_player_error(self, _error, _error_string):
         if not self.video_width:
             return
@@ -539,13 +554,20 @@ class MainWindow(QMainWindow):
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setFixedWidth(280)
 
-        self.filename_label = QLabel("No file loaded")
+        self.filename_label = QLabel("Drag and drop or choose a file")
         self.filename_label.setWordWrap(True)
         sidebar.addWidget(self.filename_label)
 
+        file_button_row = QHBoxLayout()
         self.browse_button = QPushButton("Browse...")
         self.browse_button.clicked.connect(self.browse_for_file)
-        sidebar.addWidget(self.browse_button)
+        file_button_row.addWidget(self.browse_button)
+
+        self.remove_file_button = QPushButton("Remove File")
+        self.remove_file_button.clicked.connect(self.remove_file)
+        self.remove_file_button.setEnabled(False)
+        file_button_row.addWidget(self.remove_file_button)
+        sidebar.addLayout(file_button_row)
 
         sidebar.addWidget(make_separator())
         sidebar.addWidget(make_heading("Cut"))
@@ -691,12 +713,35 @@ class MainWindow(QMainWindow):
         self.process_button.setEnabled(True)
         self.play_button.setEnabled(True)
         self.mute_button.setEnabled(True)
+        self.remove_file_button.setEnabled(True)
         self.status.setText("")
         self.update_suffix_placeholder()
 
         self.preview.load(path, w, h)
         self.scrubber.set_duration(duration)
         self.time_label.setText(f"0:00 / {format_time(duration)}")
+
+    def remove_file(self):
+        self.path = None
+        self.video_width = None
+        self.video_height = None
+        self.duration = None
+        self.filename_label.setText("Drag and drop or choose a file")
+        self.browse_button.setText("Browse...")
+        for field in self.time_edits:
+            field.clear()
+        for field in self.crop_edits:
+            field.clear()
+        self.process_button.setEnabled(False)
+        self.play_button.setEnabled(False)
+        self.mute_button.setEnabled(False)
+        self.remove_file_button.setEnabled(False)
+        self.status.setText("")
+        self.update_suffix_placeholder()
+
+        self.preview.unload()
+        self.scrubber.set_duration(0)
+        self.time_label.setText("0:00 / 0:00")
 
     # --- video preview <-> crop field sync ---
 
