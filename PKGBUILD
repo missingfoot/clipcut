@@ -1,6 +1,6 @@
 # Maintainer: James <claude@jamessparkes.com>
 pkgname=clipcut
-pkgver=1.9.5
+pkgver=1.9.4
 pkgrel=1
 pkgdesc="Quick drag-and-drop video trim/crop tool that preserves the source's modified date"
 arch=('any')
