@@ -7,8 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -151,16 +149,6 @@ class MainWindow(QMainWindow):
         suffix_form.addRow("Append text:", self.suffix_edit)
         layout.addLayout(suffix_form)
 
-        self.show_command = QCheckBox("Show command")
-        layout.addWidget(self.show_command)
-
-        self.console = QPlainTextEdit()
-        self.console.setReadOnly(True)
-        self.console.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.console.setMaximumBlockCount(2000)
-        self.console.setVisible(False)
-        layout.addWidget(self.console)
-
         button_row = QHBoxLayout()
         self.cut_button = QPushButton("Cut")
         self.cut_button.clicked.connect(self.do_cut)
@@ -177,13 +165,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
 
         self.setAcceptDrops(True)
-        self.process = None
-
-        self.show_command.toggled.connect(self.on_show_command_toggled)
-        for field in (self.start_edit, self.end_edit, self.crop_left,
-                      self.crop_top, self.crop_right, self.crop_bottom, self.suffix_edit):
-            field.textChanged.connect(self.update_preview)
-        self.remove_audio.toggled.connect(self.update_preview)
 
         if initial_path:
             self.load_file(initial_path)
@@ -211,7 +192,6 @@ class MainWindow(QMainWindow):
         self.end_edit.clear()
         self.cut_button.setEnabled(True)
         self.status.setText("")
-        self.update_preview()
 
     def build_command(self):
         """Return (cmd, out_path). Raises ValueError on bad input."""
@@ -252,23 +232,6 @@ class MainWindow(QMainWindow):
         cmd.append(str(out_path))
         return cmd, out_path
 
-    def on_show_command_toggled(self, checked):
-        self.console.setVisible(checked)
-        if checked:
-            self.update_preview()
-
-    def update_preview(self):
-        if not self.show_command.isChecked() or self.process is not None:
-            return
-        if not self.path:
-            self.console.setPlainText("(drop a video to see the command)")
-            return
-        try:
-            cmd, _ = self.build_command()
-            self.console.setPlainText(" ".join(cmd))
-        except ValueError as e:
-            self.console.setPlainText(f"(invalid input: {e})")
-
     def do_cut(self):
         try:
             cmd, out_path = self.build_command()
@@ -276,33 +239,15 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Invalid input: {e}")
             return
 
-        self.pending_out_path = out_path
         self.status.setText("Cutting...")
         self.cut_button.setEnabled(False)
+        QApplication.processEvents()
 
-        if self.show_command.isChecked():
-            self.console.setPlainText(" ".join(cmd) + "\n\n")
-
-        self.process = QProcess(self)
-        self.process.setProcessChannelMode(QProcess.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self.on_process_output)
-        self.process.finished.connect(self.on_process_finished)
-        self.process.start(cmd[0], cmd[1:])
-
-    def on_process_output(self):
-        if self.show_command.isChecked():
-            data = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
-            self.console.appendPlainText(data.rstrip("\n"))
-        else:
-            self.process.readAllStandardOutput()
-
-    def on_process_finished(self, exit_code, _exit_status):
+        result = subprocess.run(cmd, capture_output=True, text=True)
         self.cut_button.setEnabled(True)
-        out_path = self.pending_out_path
-        self.process = None
 
-        if exit_code != 0:
-            self.status.setText(f"ffmpeg failed (exit {exit_code}) - see command output")
+        if result.returncode != 0:
+            self.status.setText(f"ffmpeg failed:\n{result.stderr[-500:]}")
             return
 
         src_stat = self.path.stat()
