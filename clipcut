@@ -711,6 +711,14 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
             self.show_drop_overlay()
 
+    def dragMoveEvent(self, event):
+        # Qt requires every move tick to re-accept, not just dragEnterEvent - any tick
+        # that lands here unaccepted gets treated as a reject by Qt's drag manager,
+        # which was causing the accept/reject flicker.
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.show_drop_overlay()
+
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
