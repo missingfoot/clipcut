@@ -106,11 +106,11 @@ class MainWindow(QMainWindow):
 
         form = QFormLayout()
         self.start_edit = QLineEdit()
-        self.start_edit.setPlaceholderText("0 or HH:MM:SS")
+        self.start_edit.setPlaceholderText("0")
         self.end_edit = QLineEdit()
-        self.end_edit.setPlaceholderText("end or HH:MM:SS")
-        form.addRow("Start:", self.start_edit)
-        form.addRow("End:", self.end_edit)
+        self.end_edit.setPlaceholderText("0")
+        form.addRow("Chop off start (secs):", self.start_edit)
+        form.addRow("Chop off end (secs):", self.end_edit)
         layout.addLayout(form)
 
         crop_grid = QGridLayout()
@@ -161,21 +161,21 @@ class MainWindow(QMainWindow):
         self.width, self.height = w, h
         self.duration = duration
         self.drop.setText(f"{path.name}\n{w}x{h}, {duration:.1f}s")
-        self.start_edit.setText("0")
-        self.end_edit.setText(f"{duration:.2f}")
+        self.start_edit.clear()
+        self.end_edit.clear()
         self.cut_button.setEnabled(True)
         self.status.setText("")
 
     def do_cut(self):
         try:
-            start = parse_time(self.start_edit.text())
-            end = parse_time(self.end_edit.text())
-            if start is None:
-                start = 0.0
-            if end is None:
-                end = self.duration
+            chop_start = parse_time(self.start_edit.text()) or 0.0
+            chop_end = parse_time(self.end_edit.text()) or 0.0
+            if chop_start < 0 or chop_end < 0:
+                raise ValueError("chop amounts must be >= 0")
+            start = chop_start
+            end = self.duration - chop_end
             if not (0 <= start < end <= self.duration + 0.01):
-                raise ValueError("start/end must satisfy 0 <= start < end <= duration")
+                raise ValueError("chop amounts leave nothing to cut")
 
             left = int(self.crop_left.text() or 0)
             top = int(self.crop_top.text() or 0)
