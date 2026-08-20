@@ -163,8 +163,7 @@ class DropOverlay(QLabel):
         self.on_drop = on_drop
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(
-            "QLabel { background-color: rgba(20, 20, 20, 210); color: white; "
-            "font-size: 20px; border: 3px dashed #999999; border-radius: 12px; }"
+            "QLabel { background-color: rgba(20, 20, 20, 210); color: white; font-size: 20px; }"
         )
         self.setAcceptDrops(True)
         self.hide()
@@ -678,14 +677,14 @@ class MainWindow(QMainWindow):
         if initial_path:
             self.load_file(initial_path)
 
-    OVERLAY_MARGIN = 24
-
-    def overlay_rect(self):
-        m = self.OVERLAY_MARGIN
-        return self.centralWidget().rect().adjusted(m, m, -m, -m)
-
     def show_drop_overlay(self):
-        self.drop_overlay.setGeometry(self.overlay_rect())
+        # Only do the show/raise/geometry work on the transition into visible - calling
+        # this on every DragMove event (which fires continuously as the mouse moves)
+        # forced a stacking-order change and repaint every tick, which is what actually
+        # caused the flicker (not the overlay's size/margins).
+        if self.drop_overlay.isVisible():
+            return
+        self.drop_overlay.setGeometry(self.centralWidget().rect())
         self.drop_overlay.show()
         self.drop_overlay.raise_()
 
@@ -720,7 +719,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.drop_overlay.isVisible():
-            self.drop_overlay.setGeometry(self.overlay_rect())
+            self.drop_overlay.setGeometry(self.centralWidget().rect())
 
     def browse_for_file(self):
         filename, _filter = QFileDialog.getOpenFileName(self, "Open video", str(Path.home()), "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)")
