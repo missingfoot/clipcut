@@ -145,6 +145,30 @@ def make_crop_group(label_text, edit):
     return group
 
 
+class DropLabel(QLabel):
+    """A plain-widget drop target. QGraphicsView's viewport doesn't reliably accept
+    native OS drag-and-drop, so this stays as the actual, known-working drop zone."""
+
+    def __init__(self, on_drop):
+        super().__init__("Drop video here")
+        self.on_drop = on_drop
+        self.setAlignment(Qt.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setFixedHeight(48)
+        self.setStyleSheet(
+            "QLabel { border: 2px dashed #999999; border-radius: 6px; padding: 8px; }"
+        )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.on_drop(Path(urls[0].toLocalFile()))
+
+
 class GuideItem(QGraphicsRectItem):
     """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
@@ -488,6 +512,9 @@ class MainWindow(QMainWindow):
 
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
+        self.drop_label = DropLabel(self.load_file)
+        left.addWidget(self.drop_label)
+
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
         left.addWidget(self.preview, stretch=1)
@@ -629,6 +656,7 @@ class MainWindow(QMainWindow):
         self.path = path
         self.video_width, self.video_height = w, h
         self.duration = duration
+        self.drop_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
         for field in self.time_edits:
             field.clear()
         for field in self.crop_edits:
