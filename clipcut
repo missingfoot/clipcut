@@ -698,7 +698,7 @@ class MainWindow(QMainWindow):
 
         keyframe_page = QWidget()
         keyframe_page_layout = QVBoxLayout(keyframe_page)
-        keyframe_page_layout.setContentsMargins(8, 8, 12, 8)
+        keyframe_page_layout.setContentsMargins(8, 8, 8, 8)
         keyframe_page_layout.setSpacing(8)
         keyframe_page_layout.addWidget(make_note("Lossless, snaps to nearest keyframe."))
         keyframe_page_layout.addWidget(self.keyframe_start_widget)
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
 
         frame_page = QWidget()
         frame_page_layout = QVBoxLayout(frame_page)
-        frame_page_layout.setContentsMargins(8, 8, 12, 8)
+        frame_page_layout.setContentsMargins(8, 8, 8, 8)
         frame_page_layout.setSpacing(8)
         frame_page_layout.addWidget(make_note("Precise, but needs re-encode (not fully lossless)."))
         frame_page_layout.addWidget(self.frame_start_widget)
