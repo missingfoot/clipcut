@@ -7,15 +7,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QRect, QTimer, QUrl, Signal
+from PySide6.QtCore import QRect, Qt, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFormLayout,
     QFrame,
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsView,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -141,87 +145,97 @@ def make_crop_group(label_text, edit):
     return group
 
 
-class GuideLine(QWidget):
-    """A draggable crop guide. Emits its new position (in parent-local pixels) while dragged."""
+class GuideItem(QGraphicsRectItem):
+    """A draggable crop guide line. Paints in 'difference' blend mode so it stays
+    visible against any underlying color. Calls back with its new scene-coordinate
+    position (y for horizontal guides, x for vertical) while dragged."""
 
-    moved = Signal(int)
-
-    def __init__(self, orientation, parent=None):
-        super().__init__(parent)
+    def __init__(self, orientation, on_drag):
+        super().__init__()
         self.orientation = orientation  # 'h' (drags vertically) or 'v' (drags horizontally)
+        self.on_drag = on_drag
         self.setCursor(Qt.SizeVerCursor if orientation == "h" else Qt.SizeHorCursor)
-        self.setStyleSheet("background-color: rgba(80, 200, 255, 220);")
+        self.setPen(Qt.NoPen)
+        self.setBrush(Qt.NoBrush)
+        self.setZValue(10)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
         self._dragging = False
-        self._press_pos = None
+
+    def paint(self, painter, _option, _widget=None):
+        painter.setCompositionMode(QPainter.CompositionMode_Difference)
+        painter.fillRect(self.rect(), QColor(255, 255, 255))
 
     def mousePressEvent(self, event):
         self._dragging = True
-        self._press_pos = event.position().toPoint()
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
-        delta = event.position().toPoint() - self._press_pos
-        if self.orientation == "h":
-            self.moved.emit(self.y() + delta.y())
-        else:
-            self.moved.emit(self.x() + delta.x())
+        pos = event.scenePos()
+        self.on_drag(pos.y() if self.orientation == "h" else pos.x())
 
-    def mouseReleaseEvent(self, event):
+    def mouseReleaseEvent(self, _event):
         self._dragging = False
 
 
-class VideoPreview(QWidget):
+class VideoPreview(QGraphicsView):
     """Video surface with playback, drop-to-load, and draggable crop guides overlaid on the frame."""
 
     guides_changed = Signal(int, int, int, int)  # left, top, right, bottom (real video pixels)
 
-    THICKNESS = 4
+    THICKNESS = 3
 
     def __init__(self, on_drop, parent=None):
         super().__init__(parent)
         self.on_drop = on_drop
         self.setAcceptDrops(True)
         self.setMinimumSize(320, 240)
-        self.setStyleSheet("background-color: #000000;")
+        self.setStyleSheet("background-color: #000000; border: none;")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.gscene = QGraphicsScene(self)
+        self.setScene(self.gscene)
 
         self.video_width = None
         self.video_height = None
         self.crop = (0, 0, 0, 0)  # left, top, right, bottom, in real video pixels
 
-        self.video_widget = QVideoWidget(self)
+        self.video_item = QGraphicsVideoItem()
+        self.gscene.addItem(self.video_item)
+
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
+        self.player.setVideoOutput(self.video_item)
         self.player.errorOccurred.connect(self.on_player_error)
 
-        self.fallback_label = QLabel(self)
-        self.fallback_label.setAlignment(Qt.AlignCenter)
-        self.fallback_label.hide()
+        self.fallback_item = QGraphicsPixmapItem()
+        self.gscene.addItem(self.fallback_item)
+        self.fallback_item.hide()
 
-        self.hint_label = QLabel("Drop video here", self)
-        self.hint_label.setAlignment(Qt.AlignCenter)
-        self.hint_label.setStyleSheet("color: #999999; font-size: 14px;")
+        self.hint_item = self.gscene.addSimpleText("Drop video here")
+        self.hint_item.setBrush(QColor("#999999"))
 
-        self.guide_top = GuideLine("h", self)
-        self.guide_bottom = GuideLine("h", self)
-        self.guide_left = GuideLine("v", self)
-        self.guide_right = GuideLine("v", self)
-        self.guide_top.moved.connect(lambda pos: self._guide_dragged("top", pos))
-        self.guide_bottom.moved.connect(lambda pos: self._guide_dragged("bottom", pos))
-        self.guide_left.moved.connect(lambda pos: self._guide_dragged("left", pos))
-        self.guide_right.moved.connect(lambda pos: self._guide_dragged("right", pos))
+        self.guide_top = GuideItem("h", lambda y: self._guide_dragged("top", y))
+        self.guide_bottom = GuideItem("h", lambda y: self._guide_dragged("bottom", y))
+        self.guide_left = GuideItem("v", lambda x: self._guide_dragged("left", x))
+        self.guide_right = GuideItem("v", lambda x: self._guide_dragged("right", x))
         for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
+            self.gscene.addItem(g)
             g.hide()
 
-        self.shade_top = QWidget(self)
-        self.shade_bottom = QWidget(self)
-        self.shade_left = QWidget(self)
-        self.shade_right = QWidget(self)
+        self.shade_top = QGraphicsRectItem()
+        self.shade_bottom = QGraphicsRectItem()
+        self.shade_left = QGraphicsRectItem()
+        self.shade_right = QGraphicsRectItem()
         for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
-            s.setStyleSheet("background-color: rgba(0, 0, 0, 140);")
-            s.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            s.setBrush(QColor(0, 0, 0, 140))
+            s.setPen(Qt.NoPen)
+            s.setZValue(5)
+            self.gscene.addItem(s)
             s.hide()
 
     def dragEnterEvent(self, event):
@@ -235,18 +249,20 @@ class VideoPreview(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.video_widget.setGeometry(self.rect())
-        self.fallback_label.setGeometry(self.rect())
-        self.hint_label.setGeometry(self.rect())
+        rect = self.viewport().rect()
+        self.gscene.setSceneRect(0, 0, rect.width(), rect.height())
+        text_rect = self.hint_item.boundingRect()
+        self.hint_item.setPos((rect.width() - text_rect.width()) / 2,
+                               (rect.height() - text_rect.height()) / 2)
         self.refresh_overlay()
 
     def load(self, path, video_width, video_height):
         self.video_width = video_width
         self.video_height = video_height
         self.crop = (0, 0, 0, 0)
-        self.hint_label.hide()
-        self.fallback_label.hide()
-        self.video_widget.show()
+        self.hint_item.hide()
+        self.fallback_item.hide()
+        self.video_item.show()
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.player.play()
         for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
@@ -255,7 +271,7 @@ class VideoPreview(QWidget):
             s.show()
         self.refresh_overlay()
 
-    def on_player_error(self, _error, error_string):
+    def on_player_error(self, _error, _error_string):
         if not self.video_width:
             return
         png_bytes = grab_thumbnail(self.player.source().toLocalFile())
@@ -263,19 +279,19 @@ class VideoPreview(QWidget):
             return
         pixmap = QPixmap()
         pixmap.loadFromData(png_bytes, "PNG")
-        self.fallback_label.setPixmap(
-            pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
-        self.video_widget.hide()
-        self.fallback_label.show()
+        self.fallback_item.setPixmap(pixmap)
+        self.video_item.hide()
+        self.fallback_item.show()
+        self.refresh_overlay()
 
     def content_rect(self):
-        """Where the video frame is actually drawn within this widget (letterbox/pillarbox-aware)."""
+        """Where the video frame is actually drawn within the view (letterbox/pillarbox-aware)."""
+        rect = self.viewport().rect()
         if not self.video_width or not self.video_height:
-            return self.rect()
-        w, h = self.width(), self.height()
+            return QRect(0, 0, rect.width(), rect.height())
+        w, h = rect.width(), rect.height()
         if w <= 0 or h <= 0:
-            return self.rect()
+            return QRect(0, 0, w, h)
         video_aspect = self.video_width / self.video_height
         widget_aspect = w / h
         if widget_aspect > video_aspect:
@@ -293,9 +309,16 @@ class VideoPreview(QWidget):
         self.refresh_overlay()
 
     def refresh_overlay(self):
+        rect = self.content_rect()
+        self.video_item.setPos(rect.x(), rect.y())
+        self.video_item.setSize(rect.size().toSizeF())
+        self.fallback_item.setPos(rect.x(), rect.y())
+        if not self.fallback_item.pixmap().isNull():
+            scale = rect.width() / max(1, self.fallback_item.pixmap().width())
+            self.fallback_item.setScale(scale)
+
         if not self.video_width or not self.video_height:
             return
-        rect = self.content_rect()
         left, top, right, bottom = self.crop
         sx = rect.width() / self.video_width
         sy = rect.height() / self.video_height
@@ -306,18 +329,15 @@ class VideoPreview(QWidget):
         gy_top = rect.top() + int(top * sy)
         gy_bottom = rect.bottom() - int(bottom * sy)
 
-        self.guide_left.setGeometry(gx_left - t // 2, rect.top(), t, rect.height())
-        self.guide_right.setGeometry(gx_right - t // 2, rect.top(), t, rect.height())
-        self.guide_top.setGeometry(rect.left(), gy_top - t // 2, rect.width(), t)
-        self.guide_bottom.setGeometry(rect.left(), gy_bottom - t // 2, rect.width(), t)
+        self.guide_left.setRect(gx_left - t / 2, rect.top(), t, rect.height())
+        self.guide_right.setRect(gx_right - t / 2, rect.top(), t, rect.height())
+        self.guide_top.setRect(rect.left(), gy_top - t / 2, rect.width(), t)
+        self.guide_bottom.setRect(rect.left(), gy_bottom - t / 2, rect.width(), t)
 
-        self.shade_left.setGeometry(rect.left(), rect.top(), max(0, gx_left - rect.left()), rect.height())
-        self.shade_right.setGeometry(gx_right, rect.top(), max(0, rect.right() - gx_right), rect.height())
-        self.shade_top.setGeometry(rect.left(), rect.top(), rect.width(), max(0, gy_top - rect.top()))
-        self.shade_bottom.setGeometry(rect.left(), gy_bottom, rect.width(), max(0, rect.bottom() - gy_bottom))
-
-        for g in (self.guide_left, self.guide_right, self.guide_top, self.guide_bottom):
-            g.raise_()
+        self.shade_left.setRect(rect.left(), rect.top(), max(0, gx_left - rect.left()), rect.height())
+        self.shade_right.setRect(gx_right, rect.top(), max(0, rect.right() - gx_right), rect.height())
+        self.shade_top.setRect(rect.left(), rect.top(), rect.width(), max(0, gy_top - rect.top()))
+        self.shade_bottom.setRect(rect.left(), gy_bottom, rect.width(), max(0, rect.bottom() - gy_bottom))
 
     def _guide_dragged(self, which, pos):
         rect = self.content_rect()
