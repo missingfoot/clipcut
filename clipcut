@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -689,7 +690,11 @@ class MainWindow(QMainWindow):
 
         # A real QTabWidget (not a bare QTabBar) so the tabs read as attached to a
         # bordered content box instead of floating on their own above the fields.
+        # QTabWidget defaults to an Expanding vertical size policy, which would
+        # otherwise stretch it (and, via its child layouts, the gaps between fields)
+        # to fill any leftover window height - constrain it to its natural size.
         self.cut_mode_tabs = QTabWidget()
+        self.cut_mode_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         keyframe_page = QWidget()
         keyframe_page_layout = QVBoxLayout(keyframe_page)
@@ -698,6 +703,7 @@ class MainWindow(QMainWindow):
         keyframe_page_layout.addWidget(make_note("Lossless, but imprecise - snaps to the nearest keyframe."))
         keyframe_page_layout.addWidget(self.keyframe_start_widget)
         keyframe_page_layout.addWidget(self.keyframe_end_widget)
+        keyframe_page_layout.addStretch()
         self.cut_mode_tabs.addTab(keyframe_page, "Keyframe")
 
         frame_page = QWidget()
@@ -707,6 +713,7 @@ class MainWindow(QMainWindow):
         frame_page_layout.addWidget(make_note("Precise, but needs re-encode (not fully lossless)."))
         frame_page_layout.addWidget(self.frame_start_widget)
         frame_page_layout.addWidget(self.frame_end_widget)
+        frame_page_layout.addStretch()
         self.cut_mode_tabs.addTab(frame_page, "Frame")
 
         self.cut_mode_tabs.currentChanged.connect(self.on_cut_mode_changed)
