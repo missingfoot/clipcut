@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ClipCut
+Comment=Quick drag-and-drop video trim/crop
+Exec=/usr/bin/clipcut %f
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;

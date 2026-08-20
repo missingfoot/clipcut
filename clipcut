@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""ClipCut: quick drag-and-drop trim/crop tool that preserves source mtime."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QFormLayout,
+    QGridLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+def probe(path):
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or "ffprobe failed")
+    data = json.loads(out.stdout)
+    stream = data["streams"][0]
+    duration = float(data["format"]["duration"])
+    return int(stream["width"]), int(stream["height"]), duration
+
+
+def parse_time(text):
+    text = text.strip()
+    if not text:
+        return None
+    if ":" in text:
+        parts = [float(p) for p in text.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        h, m, s = parts
+        return h * 3600 + m * 60 + s
+    return float(text)
+
+
+def next_available(path):
+    if not path.exists():
+        return path
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}{n}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+class DropLabel(QLabel):
+    def __init__(self, on_drop):
+        super().__init__("Drop video here")
+        self.on_drop = on_drop
+        self.setAlignment(Qt.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(80)
+        self.setStyleSheet(
+            "QLabel { border: 2px dashed palette(mid); border-radius: 6px; padding: 8px; }"
+        )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.on_drop(Path(urls[0].toLocalFile()))
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, initial_path=None):
+        super().__init__()
+        self.setWindowTitle("ClipCut")
+        self.resize(420, 320)
+
+        self.path = None
+        self.width = None
+        self.height = None
+        self.duration = None
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+
+        self.drop = DropLabel(self.load_file)
+        layout.addWidget(self.drop)
+
+        form = QFormLayout()
+        self.start_edit = QLineEdit()
+        self.start_edit.setPlaceholderText("0 or HH:MM:SS")
+        self.end_edit = QLineEdit()
+        self.end_edit.setPlaceholderText("end or HH:MM:SS")
+        form.addRow("Start:", self.start_edit)
+        form.addRow("End:", self.end_edit)
+        layout.addLayout(form)
+
+        crop_grid = QGridLayout()
+        self.crop_left = QLineEdit("0")
+        self.crop_top = QLineEdit("0")
+        self.crop_right = QLineEdit("0")
+        self.crop_bottom = QLineEdit("0")
+        crop_grid.addWidget(QLabel("Crop left:"), 0, 0)
+        crop_grid.addWidget(self.crop_left, 0, 1)
+        crop_grid.addWidget(QLabel("top:"), 0, 2)
+        crop_grid.addWidget(self.crop_top, 0, 3)
+        crop_grid.addWidget(QLabel("Crop right:"), 1, 0)
+        crop_grid.addWidget(self.crop_right, 1, 1)
+        crop_grid.addWidget(QLabel("bottom:"), 1, 2)
+        crop_grid.addWidget(self.crop_bottom, 1, 3)
+        layout.addLayout(crop_grid)
+
+        self.cut_button = QPushButton("Cut")
+        self.cut_button.clicked.connect(self.do_cut)
+        self.cut_button.setEnabled(False)
+        layout.addWidget(self.cut_button)
+
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        self.setAcceptDrops(True)
+
+        if initial_path:
+            self.load_file(initial_path)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.load_file(Path(urls[0].toLocalFile()))
+
+    def load_file(self, path):
+        try:
+            w, h, duration = probe(path)
+        except Exception as e:
+            self.status.setText(f"Failed to read file: {e}")
+            return
+        self.path = path
+        self.width, self.height = w, h
+        self.duration = duration
+        self.drop.setText(f"{path.name}\n{w}x{h}, {duration:.1f}s")
+        self.start_edit.setText("0")
+        self.end_edit.setText(f"{duration:.2f}")
+        self.cut_button.setEnabled(True)
+        self.status.setText("")
+
+    def do_cut(self):
+        try:
+            start = parse_time(self.start_edit.text())
+            end = parse_time(self.end_edit.text())
+            if start is None:
+                start = 0.0
+            if end is None:
+                end = self.duration
+            if not (0 <= start < end <= self.duration + 0.01):
+                raise ValueError("start/end must satisfy 0 <= start < end <= duration")
+
+            left = int(self.crop_left.text() or 0)
+            top = int(self.crop_top.text() or 0)
+            right = int(self.crop_right.text() or 0)
+            bottom = int(self.crop_bottom.text() or 0)
+            for name, v in (("left", left), ("top", top), ("right", right), ("bottom", bottom)):
+                if v < 0:
+                    raise ValueError(f"crop {name} must be >= 0")
+
+            crop_w = self.width - left - right
+            crop_h = self.height - top - bottom
+            has_crop = left or top or right or bottom
+            if has_crop and (crop_w <= 0 or crop_h <= 0):
+                raise ValueError("crop margins exceed frame size")
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            return
+
+        out_path = next_available(self.path.with_name(f"{self.path.stem}_cut{self.path.suffix}"))
+
+        cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
+        if has_crop:
+            cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
+                    "-c:v", "libx264", "-crf", "17", "-preset", "veryfast", "-c:a", "copy"]
+        else:
+            cmd += ["-c", "copy"]
+        cmd.append(str(out_path))
+
+        self.status.setText("Cutting...")
+        self.cut_button.setEnabled(False)
+        QApplication.processEvents()
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.cut_button.setEnabled(True)
+
+        if result.returncode != 0:
+            self.status.setText(f"ffmpeg failed:\n{result.stderr[-500:]}")
+            return
+
+        src_stat = self.path.stat()
+        os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
+
+        self.status.setText(f"Saved: {out_path.name}")
+
+
+def main():
+    app = QApplication(sys.argv)
+    initial = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
+    win = MainWindow(initial)
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
