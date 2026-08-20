@@ -135,6 +135,12 @@ class MainWindow(QMainWindow):
         self.remove_audio = QCheckBox("Remove audio")
         layout.addWidget(self.remove_audio)
 
+        suffix_form = QFormLayout()
+        self.suffix_edit = QLineEdit()
+        self.suffix_edit.setPlaceholderText("cut")
+        suffix_form.addRow("Append text:", self.suffix_edit)
+        layout.addLayout(suffix_form)
+
         self.show_command = QCheckBox("Show command")
         layout.addWidget(self.show_command)
 
@@ -165,7 +171,7 @@ class MainWindow(QMainWindow):
 
         self.show_command.toggled.connect(self.on_show_command_toggled)
         for field in (self.start_edit, self.end_edit, self.crop_left,
-                      self.crop_top, self.crop_right, self.crop_bottom):
+                      self.crop_top, self.crop_right, self.crop_bottom, self.suffix_edit):
             field.textChanged.connect(self.update_preview)
         self.remove_audio.toggled.connect(self.update_preview)
 
@@ -222,7 +228,8 @@ class MainWindow(QMainWindow):
         if has_crop and (crop_w <= 0 or crop_h <= 0):
             raise ValueError("crop margins exceed frame size")
 
-        out_path = next_available(self.path.with_name(f"{self.path.stem}_cut{self.path.suffix}"))
+        append_text = self.suffix_edit.text().strip() or "cut"
+        out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
         no_audio = self.remove_audio.isChecked()
 
         cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
