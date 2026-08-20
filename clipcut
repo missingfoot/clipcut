@@ -153,39 +153,6 @@ def make_crop_group(label_text, edit):
     return group
 
 
-class DropOverlay(QLabel):
-    """Full-window phantom drop target, upload-site style: hidden until a drag enters
-    the window (shown by the parent's dragEnterEvent), then covers everything so a
-    drop lands correctly no matter which widget is underneath the cursor."""
-
-    def __init__(self, on_drop, parent):
-        super().__init__("Drop video file to load", parent)
-        self.on_drop = on_drop
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet(
-            "QLabel { background-color: rgba(20, 20, 20, 210); color: white; font-size: 20px; }"
-        )
-        self.setAcceptDrops(True)
-        self.hide()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragLeaveEvent(self, _event):
-        self.hide()
-
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        self.hide()
-        if urls:
-            self.on_drop(Path(urls[0].toLocalFile()))
-
-
 class GuideItem(QGraphicsRectItem):
     """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
@@ -524,8 +491,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.drop_overlay = DropOverlay(self.load_file, central)
-
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
         left.setContentsMargins(0, 1, 0, 0)
@@ -677,57 +642,31 @@ class MainWindow(QMainWindow):
         if initial_path:
             self.load_file(initial_path)
 
-    def show_drop_overlay(self):
-        # Only do the show/raise/geometry work on the transition into visible - calling
-        # this on every DragMove event (which fires continuously as the mouse moves)
-        # forced a stacking-order change and repaint every tick, which is what actually
-        # caused the flicker (not the overlay's size/margins).
-        if self.drop_overlay.isVisible():
-            return
-        self.drop_overlay.setGeometry(self.centralWidget().rect())
-        self.drop_overlay.show()
-        self.drop_overlay.raise_()
-
     def eventFilter(self, obj, event):
         if obj is self.preview.viewport():
             if event.type() in (QEvent.DragEnter, QEvent.DragMove):
                 if event.mimeData().hasUrls():
                     event.acceptProposedAction()
-                    self.show_drop_overlay()
                     return True
             elif event.type() == QEvent.Drop:
-                self.drop_overlay.hide()
                 urls = event.mimeData().urls()
                 if urls:
                     self.load_file(Path(urls[0].toLocalFile()))
-                return True
-            elif event.type() == QEvent.DragLeave:
-                self.drop_overlay.hide()
                 return True
         return super().eventFilter(obj, event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.show_drop_overlay()
 
     def dragMoveEvent(self, event):
-        # Qt requires every move tick to re-accept, not just dragEnterEvent - any tick
-        # that lands here unaccepted gets treated as a reject by Qt's drag manager,
-        # which was causing the accept/reject flicker.
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.show_drop_overlay()
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
             self.load_file(Path(urls[0].toLocalFile()))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.drop_overlay.isVisible():
-            self.drop_overlay.setGeometry(self.centralWidget().rect())
 
     def browse_for_file(self):
         filename, _filter = QFileDialog.getOpenFileName(self, "Open video", str(Path.home()), "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)")
