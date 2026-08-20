@@ -14,6 +14,7 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGraphicsPixmapItem,
@@ -143,30 +144,6 @@ def make_crop_group(label_text, edit):
     h.addWidget(QLabel(label_text))
     h.addWidget(edit)
     return group
-
-
-class DropLabel(QLabel):
-    """A plain-widget drop target. QGraphicsView's viewport doesn't reliably accept
-    native OS drag-and-drop, so this stays as the actual, known-working drop zone."""
-
-    def __init__(self, on_drop):
-        super().__init__("Drop video here")
-        self.on_drop = on_drop
-        self.setAlignment(Qt.AlignCenter)
-        self.setAcceptDrops(True)
-        self.setFixedHeight(48)
-        self.setStyleSheet(
-            "QLabel { border: 2px dashed #999999; border-radius: 6px; padding: 8px; }"
-        )
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        if urls:
-            self.on_drop(Path(urls[0].toLocalFile()))
 
 
 class DropOverlay(QLabel):
@@ -573,8 +550,13 @@ class MainWindow(QMainWindow):
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setFixedWidth(280)
 
-        self.drop_label = DropLabel(self.load_file)
-        sidebar.addWidget(self.drop_label)
+        self.filename_label = QLabel("No file loaded")
+        self.filename_label.setWordWrap(True)
+        sidebar.addWidget(self.filename_label)
+
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(self.browse_for_file)
+        sidebar.addWidget(self.browse_button)
 
         sidebar.addWidget(make_heading("Cut"))
         start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
@@ -666,10 +648,16 @@ class MainWindow(QMainWindow):
         if initial_path:
             self.load_file(initial_path)
 
+    OVERLAY_MARGIN = 24
+
+    def overlay_rect(self):
+        m = self.OVERLAY_MARGIN
+        return self.centralWidget().rect().adjusted(m, m, -m, -m)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.drop_overlay.setGeometry(self.centralWidget().rect())
+            self.drop_overlay.setGeometry(self.overlay_rect())
             self.drop_overlay.show()
             self.drop_overlay.raise_()
 
@@ -681,7 +669,12 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.drop_overlay.isVisible():
-            self.drop_overlay.setGeometry(self.centralWidget().rect())
+            self.drop_overlay.setGeometry(self.overlay_rect())
+
+    def browse_for_file(self):
+        filename, _filter = QFileDialog.getOpenFileName(self, "Open video", str(Path.home()), "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)")
+        if filename:
+            self.load_file(Path(filename))
 
     def load_file(self, path):
         try:
@@ -692,7 +685,8 @@ class MainWindow(QMainWindow):
         self.path = path
         self.video_width, self.video_height = w, h
         self.duration = duration
-        self.drop_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
+        self.filename_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
+        self.browse_button.setText("Replace File...")
         for field in self.time_edits:
             field.clear()
         for field in self.crop_edits:
