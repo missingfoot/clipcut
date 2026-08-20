@@ -121,6 +121,7 @@ def format_time(seconds):
 
 def make_frame_row(label_text):
     row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
     label = QLabel(label_text)
     label.setFixedWidth(40)
     row.addWidget(label)
@@ -660,14 +661,13 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(make_heading("Cut"))
 
         self.frame_mode = False
-        frame_accurate_note = QLabel(
-            "Keyframe: pick from the video's actual keyframes, fully lossless. "
-            "Frame: cut on any exact frame, requires re-encode (not fully lossless)."
-        )
-        frame_accurate_note.setStyleSheet("color: #999999; font-size: 10px;")
-        frame_accurate_note.setAlignment(Qt.AlignLeft)
-        frame_accurate_note.setWordWrap(True)
-        sidebar.addWidget(frame_accurate_note)
+
+        def make_note(text):
+            note = QLabel(text)
+            note.setStyleSheet("color: #999999; font-size: 10px;")
+            note.setAlignment(Qt.AlignLeft)
+            note.setWordWrap(True)
+            return note
 
         start_kf_row, self.start_keyframe_edit, self.start_keyframe_ref = make_frame_row("Start:")
         self.keyframe_start_widget = QWidget()
@@ -694,6 +694,8 @@ class MainWindow(QMainWindow):
         keyframe_page = QWidget()
         keyframe_page_layout = QVBoxLayout(keyframe_page)
         keyframe_page_layout.setContentsMargins(4, 4, 4, 4)
+        keyframe_page_layout.setSpacing(2)
+        keyframe_page_layout.addWidget(make_note("Lossless, but imprecise - snaps to the nearest keyframe."))
         keyframe_page_layout.addWidget(self.keyframe_start_widget)
         keyframe_page_layout.addWidget(self.keyframe_end_widget)
         self.cut_mode_tabs.addTab(keyframe_page, "Keyframe")
@@ -701,6 +703,8 @@ class MainWindow(QMainWindow):
         frame_page = QWidget()
         frame_page_layout = QVBoxLayout(frame_page)
         frame_page_layout.setContentsMargins(4, 4, 4, 4)
+        frame_page_layout.setSpacing(2)
+        frame_page_layout.addWidget(make_note("Precise, but needs re-encode (not fully lossless)."))
         frame_page_layout.addWidget(self.frame_start_widget)
         frame_page_layout.addWidget(self.frame_end_widget)
         self.cut_mode_tabs.addTab(frame_page, "Frame")
