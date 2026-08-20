@@ -207,6 +207,7 @@ class VideoPreview(QGraphicsView):
         self.gscene.addItem(self.video_item)
 
         self.player = QMediaPlayer(self)
+        self.player.setLoops(QMediaPlayer.Infinite)
         self.audio_output = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.video_item)
@@ -477,6 +478,11 @@ class MainWindow(QMainWindow):
         self.preview.guides_changed.connect(self.on_guides_changed)
         left.addWidget(self.preview, stretch=1)
 
+        self.scrubber = Scrubber()
+        self.scrubber.seek_requested.connect(self.on_seek_requested)
+        self.scrubber.trim_changed.connect(self.on_trim_changed)
+        left.addWidget(self.scrubber)
+
         controls_row = QHBoxLayout()
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.toggle_playback)
@@ -492,11 +498,6 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(self.time_label)
         controls_row.addStretch()
         left.addLayout(controls_row)
-
-        self.scrubber = Scrubber()
-        self.scrubber.seek_requested.connect(self.on_seek_requested)
-        self.scrubber.trim_changed.connect(self.on_trim_changed)
-        left.addWidget(self.scrubber)
 
         root.addLayout(left, stretch=1)
 
