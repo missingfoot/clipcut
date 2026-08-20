@@ -63,7 +63,7 @@ class DropLabel(QLabel):
         self.setAcceptDrops(True)
         self.setMinimumHeight(80)
         self.setStyleSheet(
-            "QLabel { border: 2px dashed palette(mid); border-radius: 6px; padding: 8px; }"
+            "QLabel { border: 2px dashed palette(placeholdertext); border-radius: 6px; padding: 8px; }"
         )
 
     def dragEnterEvent(self, event):
@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
         crop_grid.setColumnStretch(2, 1)
         layout.addLayout(crop_grid)
         layout.addWidget(separator())
+        layout.addWidget(heading("Options"))
 
         self.remove_audio = QCheckBox("Remove audio")
         layout.addWidget(self.remove_audio)
