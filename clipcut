@@ -183,6 +183,7 @@ class VideoPreview(QGraphicsView):
     guides_changed = Signal(int, int, int, int)  # left, top, right, bottom (real video pixels)
 
     THICKNESS = 1
+    PADDING = 24
 
     def __init__(self, on_drop, parent=None):
         super().__init__(parent)
@@ -285,13 +286,13 @@ class VideoPreview(QGraphicsView):
         self.refresh_overlay()
 
     def content_rect(self):
-        """Where the video frame is actually drawn within the view (letterbox/pillarbox-aware)."""
+        """Where the video frame is actually drawn within the view (letterbox/pillarbox-aware),
+        inset by PADDING so crop=0 guides land clear of the video/window edge and stay grabbable."""
         rect = self.viewport().rect()
         if not self.video_width or not self.video_height:
             return QRect(0, 0, rect.width(), rect.height())
-        w, h = rect.width(), rect.height()
-        if w <= 0 or h <= 0:
-            return QRect(0, 0, w, h)
+        w = max(1, rect.width() - 2 * self.PADDING)
+        h = max(1, rect.height() - 2 * self.PADDING)
         video_aspect = self.video_width / self.video_height
         widget_aspect = w / h
         if widget_aspect > video_aspect:
@@ -300,8 +301,8 @@ class VideoPreview(QGraphicsView):
         else:
             disp_w = w
             disp_h = int(w / video_aspect)
-        x = (w - disp_w) // 2
-        y = (h - disp_h) // 2
+        x = (rect.width() - disp_w) // 2
+        y = (rect.height() - disp_h) // 2
         return QRect(x, y, disp_w, disp_h)
 
     def set_crop_pixels(self, left, top, right, bottom):
@@ -310,6 +311,7 @@ class VideoPreview(QGraphicsView):
 
     def refresh_overlay(self):
         rect = self.content_rect()
+        full = self.viewport().rect()
         self.video_item.setPos(rect.x(), rect.y())
         self.video_item.setSize(rect.size().toSizeF())
         self.fallback_item.setPos(rect.x(), rect.y())
@@ -329,15 +331,15 @@ class VideoPreview(QGraphicsView):
         gy_top = rect.top() + int(top * sy)
         gy_bottom = rect.bottom() - int(bottom * sy)
 
-        self.guide_left.setRect(gx_left - t / 2, rect.top(), t, rect.height())
-        self.guide_right.setRect(gx_right - t / 2, rect.top(), t, rect.height())
-        self.guide_top.setRect(rect.left(), gy_top - t / 2, rect.width(), t)
-        self.guide_bottom.setRect(rect.left(), gy_bottom - t / 2, rect.width(), t)
+        self.guide_left.setRect(gx_left - t / 2, 0, t, full.height())
+        self.guide_right.setRect(gx_right - t / 2, 0, t, full.height())
+        self.guide_top.setRect(0, gy_top - t / 2, full.width(), t)
+        self.guide_bottom.setRect(0, gy_bottom - t / 2, full.width(), t)
 
-        self.shade_left.setRect(rect.left(), rect.top(), max(0, gx_left - rect.left()), rect.height())
-        self.shade_right.setRect(gx_right, rect.top(), max(0, rect.right() - gx_right), rect.height())
-        self.shade_top.setRect(rect.left(), rect.top(), rect.width(), max(0, gy_top - rect.top()))
-        self.shade_bottom.setRect(rect.left(), gy_bottom, rect.width(), max(0, rect.bottom() - gy_bottom))
+        self.shade_left.setRect(0, 0, max(0, gx_left), full.height())
+        self.shade_right.setRect(gx_right, 0, max(0, full.width() - gx_right), full.height())
+        self.shade_top.setRect(0, 0, full.width(), max(0, gy_top))
+        self.shade_bottom.setRect(0, gy_bottom, full.width(), max(0, full.height() - gy_bottom))
 
     def _guide_dragged(self, which, pos):
         rect = self.content_rect()
