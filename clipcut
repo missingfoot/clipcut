@@ -773,12 +773,6 @@ class MainWindow(QMainWindow):
         self.section_tabs = QTabWidget()
         self.section_tabs.setDocumentMode(True)
         self.section_tabs.tabBar().setExpanding(True)
-        self.section_tabs.setStyleSheet(
-            "QTabWidget::pane { border: none; margin: 0px; }"
-            "QTabBar::tab { border: none; }"
-            "QTabBar::tab:hover { border: none; }"
-            "QTabBar::tab:selected { border: none; }"
-        )
         self.section_tabs.addTab(cut_tab_page, "Cut")
         self.section_tabs.addTab(crop_tab_page, "Crop")
         self.section_tabs.addTab(audio_tab_page, "Audio")
