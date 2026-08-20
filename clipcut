@@ -570,7 +570,7 @@ class MainWindow(QMainWindow):
 
         # --- right column: existing sidebar controls ---
         sidebar = QVBoxLayout()
-        sidebar.setContentsMargins(12, 12, 12, 12)
+        sidebar.setContentsMargins(12, 1, 12, 12)
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setFixedWidth(280)
