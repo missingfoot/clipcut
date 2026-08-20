@@ -7,7 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QProcess
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -133,6 +135,16 @@ class MainWindow(QMainWindow):
         self.remove_audio = QCheckBox("Remove audio")
         layout.addWidget(self.remove_audio)
 
+        self.show_command = QCheckBox("Show command")
+        layout.addWidget(self.show_command)
+
+        self.console = QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.console.setMaximumBlockCount(2000)
+        self.console.setVisible(False)
+        layout.addWidget(self.console)
+
         button_row = QHBoxLayout()
         self.cut_button = QPushButton("Cut")
         self.cut_button.clicked.connect(self.do_cut)
@@ -149,6 +161,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
 
         self.setAcceptDrops(True)
+        self.process = None
+
+        self.show_command.toggled.connect(self.on_show_command_toggled)
+        for field in (self.start_edit, self.end_edit, self.crop_left,
+                      self.crop_top, self.crop_right, self.crop_bottom):
+            field.textChanged.connect(self.update_preview)
+        self.remove_audio.toggled.connect(self.update_preview)
 
         if initial_path:
             self.load_file(initial_path)
@@ -176,63 +195,101 @@ class MainWindow(QMainWindow):
         self.end_edit.clear()
         self.cut_button.setEnabled(True)
         self.status.setText("")
+        self.update_preview()
 
-    def do_cut(self):
-        try:
-            chop_start = parse_time(self.start_edit.text()) or 0.0
-            chop_end = parse_time(self.end_edit.text()) or 0.0
-            if chop_start < 0 or chop_end < 0:
-                raise ValueError("chop amounts must be >= 0")
-            start = chop_start
-            end = self.duration - chop_end
-            if not (0 <= start < end <= self.duration + 0.01):
-                raise ValueError("chop amounts leave nothing to cut")
+    def build_command(self):
+        """Return (cmd, out_path). Raises ValueError on bad input."""
+        chop_start = parse_time(self.start_edit.text()) or 0.0
+        chop_end = parse_time(self.end_edit.text()) or 0.0
+        if chop_start < 0 or chop_end < 0:
+            raise ValueError("chop amounts must be >= 0")
+        start = chop_start
+        end = self.duration - chop_end
+        if not (0 <= start < end <= self.duration + 0.01):
+            raise ValueError("chop amounts leave nothing to cut")
 
-            left = int(self.crop_left.text() or 0)
-            top = int(self.crop_top.text() or 0)
-            right = int(self.crop_right.text() or 0)
-            bottom = int(self.crop_bottom.text() or 0)
-            for name, v in (("left", left), ("top", top), ("right", right), ("bottom", bottom)):
-                if v < 0:
-                    raise ValueError(f"crop {name} must be >= 0")
+        left = int(self.crop_left.text() or 0)
+        top = int(self.crop_top.text() or 0)
+        right = int(self.crop_right.text() or 0)
+        bottom = int(self.crop_bottom.text() or 0)
+        for name, v in (("left", left), ("top", top), ("right", right), ("bottom", bottom)):
+            if v < 0:
+                raise ValueError(f"crop {name} must be >= 0")
 
-            crop_w = self.width - left - right
-            crop_h = self.height - top - bottom
-            has_crop = left or top or right or bottom
-            if has_crop and (crop_w <= 0 or crop_h <= 0):
-                raise ValueError("crop margins exceed frame size")
-        except ValueError as e:
-            self.status.setText(f"Invalid input: {e}")
-            return
+        crop_w = self.width - left - right
+        crop_h = self.height - top - bottom
+        has_crop = left or top or right or bottom
+        if has_crop and (crop_w <= 0 or crop_h <= 0):
+            raise ValueError("crop margins exceed frame size")
 
         out_path = next_available(self.path.with_name(f"{self.path.stem}_cut{self.path.suffix}"))
-
         no_audio = self.remove_audio.isChecked()
 
         cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
         if has_crop:
             cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
                     "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
-            cmd += ["-an"] if no_audio else ["-c:a", "copy"]
         else:
             cmd += ["-c:v", "copy"]
-            cmd += ["-an"] if no_audio else ["-c:a", "copy"]
+        cmd += ["-an"] if no_audio else ["-c:a", "copy"]
         cmd.append(str(out_path))
+        return cmd, out_path
 
+    def on_show_command_toggled(self, checked):
+        self.console.setVisible(checked)
+        if checked:
+            self.update_preview()
+
+    def update_preview(self):
+        if not self.show_command.isChecked() or self.process is not None:
+            return
+        if not self.path:
+            self.console.setPlainText("(drop a video to see the command)")
+            return
+        try:
+            cmd, _ = self.build_command()
+            self.console.setPlainText(" ".join(cmd))
+        except ValueError as e:
+            self.console.setPlainText(f"(invalid input: {e})")
+
+    def do_cut(self):
+        try:
+            cmd, out_path = self.build_command()
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            return
+
+        self.pending_out_path = out_path
         self.status.setText("Cutting...")
         self.cut_button.setEnabled(False)
-        QApplication.processEvents()
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        if self.show_command.isChecked():
+            self.console.setPlainText(" ".join(cmd) + "\n\n")
+
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.on_process_output)
+        self.process.finished.connect(self.on_process_finished)
+        self.process.start(cmd[0], cmd[1:])
+
+    def on_process_output(self):
+        if self.show_command.isChecked():
+            data = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
+            self.console.appendPlainText(data.rstrip("\n"))
+        else:
+            self.process.readAllStandardOutput()
+
+    def on_process_finished(self, exit_code, _exit_status):
         self.cut_button.setEnabled(True)
+        out_path = self.pending_out_path
+        self.process = None
 
-        if result.returncode != 0:
-            self.status.setText(f"ffmpeg failed:\n{result.stderr[-500:]}")
+        if exit_code != 0:
+            self.status.setText(f"ffmpeg failed (exit {exit_code}) - see command output")
             return
 
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
-
         self.status.setText(f"Saved: {out_path.name}")
 
 
