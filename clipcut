@@ -137,6 +137,13 @@ def make_separator():
     return line
 
 
+def make_vseparator():
+    line = QFrame()
+    line.setFrameShape(QFrame.VLine)
+    line.setFrameShadow(QFrame.Sunken)
+    return line
+
+
 def make_crop_group(label_text, edit):
     group = QWidget()
     h = QHBoxLayout(group)
@@ -523,15 +530,21 @@ class MainWindow(QMainWindow):
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
-        left.setSpacing(4)
+        left.setSpacing(0)
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
         left.addWidget(self.preview, stretch=1)
 
+        left.addWidget(make_separator())
+
+        below_preview = QVBoxLayout()
+        below_preview.setContentsMargins(12, 8, 12, 12)
+        below_preview.setSpacing(8)
+
         self.scrubber = Scrubber()
         self.scrubber.seek_requested.connect(self.on_seek_requested)
         self.scrubber.trim_changed.connect(self.on_trim_changed)
-        left.addWidget(self.scrubber)
+        below_preview.addWidget(self.scrubber)
 
         controls_row = QHBoxLayout()
         self.play_button = QPushButton("Play")
@@ -547,9 +560,13 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel("0:00 / 0:00")
         controls_row.addWidget(self.time_label)
         controls_row.addStretch()
-        left.addLayout(controls_row)
+        below_preview.addLayout(controls_row)
+
+        left.addLayout(below_preview)
 
         root.addLayout(left, stretch=1)
+
+        root.addWidget(make_vseparator())
 
         # --- right column: existing sidebar controls ---
         sidebar = QVBoxLayout()
@@ -566,6 +583,7 @@ class MainWindow(QMainWindow):
         self.browse_button.clicked.connect(self.browse_for_file)
         sidebar.addWidget(self.browse_button)
 
+        sidebar.addWidget(make_separator())
         sidebar.addWidget(make_heading("Cut"))
         start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
         sidebar.addLayout(start_row)
