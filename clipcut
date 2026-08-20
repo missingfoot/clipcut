@@ -953,6 +953,11 @@ class MainWindow(QMainWindow):
                 self.start_frame_edit.setText(str(round(start * fps)))
                 self.end_frame_edit.setText(str(round(end * fps)))
             else:
+                # Coming back from frame mode, re-snap to keyframes rather than just
+                # converting the frame-exact value - otherwise leaving frame mode
+                # silently drops the keyframe alignment the time fields promise.
+                start = self.snap_time(start, is_start=True)
+                end = self.snap_time(end, is_start=False)
                 h, m, s = seconds_to_hms(start)
                 self.start_h.setText(str(h))
                 self.start_m.setText(str(m))
