@@ -184,7 +184,7 @@ class VideoPreview(QGraphicsView):
 
     guides_changed = Signal(int, int, int, int)  # left, top, right, bottom (real video pixels)
 
-    THICKNESS = 3
+    THICKNESS = 1
 
     def __init__(self, on_drop, parent=None):
         super().__init__(parent)
