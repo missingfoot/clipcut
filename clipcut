@@ -190,6 +190,7 @@ class VideoPreview(QGraphicsView):
         super().__init__(parent)
         self.on_drop = on_drop
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
         self.setMinimumSize(320, 240)
         self.setStyleSheet("background-color: #000000; border: none;")
         self.setFrameShape(QFrame.NoFrame)
