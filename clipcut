@@ -150,12 +150,13 @@ class MainWindow(QMainWindow):
             return group
 
         crop_grid = QGridLayout()
-        self.crop_left = QLineEdit("0")
-        self.crop_top = QLineEdit("0")
-        self.crop_right = QLineEdit("0")
-        self.crop_bottom = QLineEdit("0")
+        self.crop_left = QLineEdit()
+        self.crop_top = QLineEdit()
+        self.crop_right = QLineEdit()
+        self.crop_bottom = QLineEdit()
         for edit in (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom):
             edit.setMaximumWidth(60)
+            edit.setPlaceholderText("0")
 
         crop_grid.addWidget(crop_group("T", self.crop_top), 0, 0, 1, 3, Qt.AlignCenter)
         crop_grid.addWidget(crop_group("L", self.crop_left), 1, 0, Qt.AlignLeft)
@@ -172,25 +173,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(separator())
         layout.addWidget(heading("Options"))
 
+        options_row = QHBoxLayout()
         self.remove_audio = QCheckBox("Remove audio")
-        layout.addWidget(self.remove_audio)
+        options_row.addWidget(self.remove_audio)
+        self.audio_only = QCheckBox("Audio only")
+        options_row.addWidget(self.audio_only)
+        options_row.addStretch()
+        layout.addLayout(options_row)
 
         suffix_form = QFormLayout()
         self.suffix_edit = QLineEdit()
-        self.suffix_edit.setPlaceholderText("cut")
         suffix_form.addRow("Append text:", self.suffix_edit)
         layout.addLayout(suffix_form)
 
+        self.remove_audio.toggled.connect(self.on_remove_audio_toggled)
+        self.audio_only.toggled.connect(self.on_audio_only_toggled)
+        for widget in (self.start_h, self.start_m, self.start_s, self.end_h, self.end_m, self.end_s,
+                       self.crop_left, self.crop_top, self.crop_right, self.crop_bottom):
+            widget.textChanged.connect(self.update_suffix_placeholder)
+        self.remove_audio.toggled.connect(self.update_suffix_placeholder)
+        self.audio_only.toggled.connect(self.update_suffix_placeholder)
+        self.update_suffix_placeholder()
+
         button_row = QHBoxLayout()
-        self.cut_button = QPushButton("Cut")
+        self.cut_button = QPushButton("Process")
         self.cut_button.clicked.connect(self.do_cut)
         self.cut_button.setEnabled(False)
         button_row.addWidget(self.cut_button)
-
-        self.audio_button = QPushButton("Extract Audio")
-        self.audio_button.clicked.connect(self.do_extract_audio)
-        self.audio_button.setEnabled(False)
-        button_row.addWidget(self.audio_button)
 
         self.done_button = QPushButton("Done")
         self.done_button.clicked.connect(self.close)
@@ -228,8 +237,18 @@ class MainWindow(QMainWindow):
         for field in (self.start_h, self.start_m, self.start_s, self.end_h, self.end_m, self.end_s):
             field.clear()
         self.cut_button.setEnabled(True)
-        self.audio_button.setEnabled(True)
         self.status.setText("")
+        self.update_suffix_placeholder()
+
+    def on_remove_audio_toggled(self, checked):
+        if checked:
+            self.audio_only.setChecked(False)
+
+    def on_audio_only_toggled(self, checked):
+        if checked:
+            self.remove_audio.setChecked(False)
+        for widget in (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom):
+            widget.setEnabled(not checked)
 
     @staticmethod
     def hms_to_seconds(h_edit, m_edit, s_edit):
@@ -249,18 +268,7 @@ class MainWindow(QMainWindow):
             raise ValueError("chop amounts leave nothing to cut")
         return start, end
 
-    def build_audio_command(self):
-        """Return (cmd, out_path) for audio-only extraction. Raises ValueError on bad input."""
-        start, end = self.get_trim_times()
-        out_path = next_available(self.path.with_name(f"{self.path.stem}_audio.m4a"))
-        cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end),
-               "-vn", "-c:a", "copy", str(out_path)]
-        return cmd, out_path
-
-    def build_command(self):
-        """Return (cmd, out_path). Raises ValueError on bad input."""
-        start, end = self.get_trim_times()
-
+    def get_crop(self):
         left = int(self.crop_left.text() or 0)
         top = int(self.crop_top.text() or 0)
         right = int(self.crop_right.text() or 0)
@@ -268,36 +276,75 @@ class MainWindow(QMainWindow):
         for name, v in (("left", left), ("top", top), ("right", right), ("bottom", bottom)):
             if v < 0:
                 raise ValueError(f"crop {name} must be >= 0")
-
         crop_w = self.width - left - right
         crop_h = self.height - top - bottom
-        has_crop = left or top or right or bottom
+        has_crop = bool(left or top or right or bottom)
         if has_crop and (crop_w <= 0 or crop_h <= 0):
             raise ValueError("crop margins exceed frame size")
+        return left, top, crop_w, crop_h, has_crop
 
-        append_text = self.suffix_edit.text().strip() or "cut"
-        out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
-        no_audio = self.remove_audio.isChecked()
+    def compute_default_suffix(self):
+        """Best-effort suffix reflecting current options, for the placeholder text."""
+        if self.audio_only.isChecked():
+            return "audio_only"
+        try:
+            chop_start = self.hms_to_seconds(self.start_h, self.start_m, self.start_s)
+            chop_end = self.hms_to_seconds(self.end_h, self.end_m, self.end_s)
+            trimmed = chop_start > 0 or chop_end > 0
+        except ValueError:
+            trimmed = False
+        try:
+            _, _, _, _, has_crop = self.get_crop() if self.path else (0, 0, 0, 0, False)
+        except ValueError:
+            has_crop = False
 
+        parts = []
+        if has_crop:
+            parts.append("cropped")
+        if self.remove_audio.isChecked():
+            parts.append("no_audio")
+        if trimmed or not parts:
+            parts.append("cut")
+        return "_".join(parts)
+
+    def update_suffix_placeholder(self):
+        self.suffix_edit.setPlaceholderText(self.compute_default_suffix())
+
+    def build_command(self):
+        """Return (cmd, out_path). Raises ValueError on bad input."""
+        start, end = self.get_trim_times()
+        append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
         cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
+
+        if self.audio_only.isChecked():
+            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}.m4a"))
+            cmd += ["-vn", "-c:a", "copy", str(out_path)]
+            return cmd, out_path
+
+        left, top, crop_w, crop_h, has_crop = self.get_crop()
+        out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
         if has_crop:
             cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
                     "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
         else:
             cmd += ["-c:v", "copy"]
-        cmd += ["-an"] if no_audio else ["-c:a", "copy"]
+        cmd += ["-an"] if self.remove_audio.isChecked() else ["-c:a", "copy"]
         cmd.append(str(out_path))
         return cmd, out_path
 
-    def run_ffmpeg(self, cmd, out_path):
+    def do_cut(self):
+        try:
+            cmd, out_path = self.build_command()
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            return
+
         self.status.setText("Working...")
         self.cut_button.setEnabled(False)
-        self.audio_button.setEnabled(False)
         QApplication.processEvents()
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         self.cut_button.setEnabled(True)
-        self.audio_button.setEnabled(True)
 
         if result.returncode != 0:
             self.status.setText(f"ffmpeg failed:\n{result.stderr[-500:]}")
@@ -306,22 +353,6 @@ class MainWindow(QMainWindow):
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
         self.status.setText(f"Saved: {out_path.name}")
-
-    def do_cut(self):
-        try:
-            cmd, out_path = self.build_command()
-        except ValueError as e:
-            self.status.setText(f"Invalid input: {e}")
-            return
-        self.run_ffmpeg(cmd, out_path)
-
-    def do_extract_audio(self):
-        try:
-            cmd, out_path = self.build_audio_command()
-        except ValueError as e:
-            self.status.setText(f"Invalid input: {e}")
-            return
-        self.run_ffmpeg(cmd, out_path)
 
 
 def main():
