@@ -657,8 +657,6 @@ class MainWindow(QMainWindow):
         file_button_row.addWidget(self.remove_file_button)
         sidebar.addLayout(file_button_row)
 
-        sidebar_hr()
-
         self.frame_mode = False
 
         def make_note(text):
