@@ -149,6 +149,9 @@ class GuideItem(QGraphicsRectItem):
     """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
 
+    ACTIVE_COLOR = QColor(255, 0, 255)
+    INACTIVE_COLOR = QColor(255, 255, 255, 60)
+
     def __init__(self, orientation, on_drag):
         super().__init__()
         self.orientation = orientation  # 'h' (drags vertically) or 'v' (drags horizontally)
@@ -159,9 +162,15 @@ class GuideItem(QGraphicsRectItem):
         self.setZValue(10)
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self._dragging = False
+        self._active = False
+
+    def set_active(self, active):
+        if active != self._active:
+            self._active = active
+            self.update()
 
     def paint(self, painter, _option, _widget=None):
-        painter.fillRect(self.rect(), QColor(255, 0, 255))
+        painter.fillRect(self.rect(), self.ACTIVE_COLOR if self._active else self.INACTIVE_COLOR)
 
     def mousePressEvent(self, event):
         self._dragging = True
@@ -335,6 +344,10 @@ class VideoPreview(QGraphicsView):
         self.guide_right.setRect(gx_right - t / 2, 0, t, full.height())
         self.guide_top.setRect(0, gy_top - t / 2, full.width(), t)
         self.guide_bottom.setRect(0, gy_bottom - t / 2, full.width(), t)
+        self.guide_left.set_active(left > 0)
+        self.guide_right.set_active(right > 0)
+        self.guide_top.set_active(top > 0)
+        self.guide_bottom.set_active(bottom > 0)
 
         self.shade_left.setRect(0, 0, max(0, gx_left), full.height())
         self.shade_right.setRect(gx_right, 0, max(0, full.width() - gx_right), full.height())
