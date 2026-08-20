@@ -7,7 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer
+from PySide6.QtCore import Qt, QProcess, QRect, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,6 +47,17 @@ def probe(path):
     return int(stream["width"]), int(stream["height"]), duration
 
 
+def grab_thumbnail(path):
+    """Grab the first frame as a PNG (bytes), for players that fail to decode a preview."""
+    out = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+        capture_output=True,
+    )
+    if out.returncode != 0 or not out.stdout:
+        return None
+    return out.stdout
+
+
 def next_available(path):
     if not path.exists():
         return path
@@ -61,6 +75,20 @@ def parse_out_time_seconds(line):
         return None
     h, m, s = line[len("out_time="):].split(":")
     return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def seconds_to_hms(total_seconds):
+    total_seconds = max(0, int(round(total_seconds)))
+    h, rem = divmod(total_seconds, 3600)
+    m, s = divmod(rem, 60)
+    return h, m, s
+
+
+def format_time(seconds):
+    h, m, s = seconds_to_hms(seconds)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 def make_time_row(label_text):
@@ -113,16 +141,88 @@ def make_crop_group(label_text, edit):
     return group
 
 
-class DropLabel(QLabel):
-    def __init__(self, on_drop):
-        super().__init__("Drop video here")
+class GuideLine(QWidget):
+    """A draggable crop guide. Emits its new position (in parent-local pixels) while dragged."""
+
+    moved = Signal(int)
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(parent)
+        self.orientation = orientation  # 'h' (drags vertically) or 'v' (drags horizontally)
+        self.setCursor(Qt.SizeVerCursor if orientation == "h" else Qt.SizeHorCursor)
+        self.setStyleSheet("background-color: rgba(80, 200, 255, 220);")
+        self._dragging = False
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        self._dragging = True
+        self._press_pos = event.position().toPoint()
+
+    def mouseMoveEvent(self, event):
+        if not self._dragging:
+            return
+        delta = event.position().toPoint() - self._press_pos
+        if self.orientation == "h":
+            self.moved.emit(self.y() + delta.y())
+        else:
+            self.moved.emit(self.x() + delta.x())
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+
+
+class VideoPreview(QWidget):
+    """Video surface with playback, drop-to-load, and draggable crop guides overlaid on the frame."""
+
+    guides_changed = Signal(int, int, int, int)  # left, top, right, bottom (real video pixels)
+
+    THICKNESS = 4
+
+    def __init__(self, on_drop, parent=None):
+        super().__init__(parent)
         self.on_drop = on_drop
-        self.setAlignment(Qt.AlignCenter)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(80)
-        self.setStyleSheet(
-            "QLabel { border: 2px dashed #999999; border-radius: 6px; padding: 8px; }"
-        )
+        self.setMinimumSize(320, 240)
+        self.setStyleSheet("background-color: #000000;")
+
+        self.video_width = None
+        self.video_height = None
+        self.crop = (0, 0, 0, 0)  # left, top, right, bottom, in real video pixels
+
+        self.video_widget = QVideoWidget(self)
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.player.setAudioOutput(self.audio_output)
+        self.player.setVideoOutput(self.video_widget)
+        self.player.errorOccurred.connect(self.on_player_error)
+
+        self.fallback_label = QLabel(self)
+        self.fallback_label.setAlignment(Qt.AlignCenter)
+        self.fallback_label.hide()
+
+        self.hint_label = QLabel("Drop video here", self)
+        self.hint_label.setAlignment(Qt.AlignCenter)
+        self.hint_label.setStyleSheet("color: #999999; font-size: 14px;")
+
+        self.guide_top = GuideLine("h", self)
+        self.guide_bottom = GuideLine("h", self)
+        self.guide_left = GuideLine("v", self)
+        self.guide_right = GuideLine("v", self)
+        self.guide_top.moved.connect(lambda pos: self._guide_dragged("top", pos))
+        self.guide_bottom.moved.connect(lambda pos: self._guide_dragged("bottom", pos))
+        self.guide_left.moved.connect(lambda pos: self._guide_dragged("left", pos))
+        self.guide_right.moved.connect(lambda pos: self._guide_dragged("right", pos))
+        for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
+            g.hide()
+
+        self.shade_top = QWidget(self)
+        self.shade_bottom = QWidget(self)
+        self.shade_left = QWidget(self)
+        self.shade_right = QWidget(self)
+        for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
+            s.setStyleSheet("background-color: rgba(0, 0, 0, 140);")
+            s.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            s.hide()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -133,12 +233,205 @@ class DropLabel(QLabel):
         if urls:
             self.on_drop(Path(urls[0].toLocalFile()))
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.video_widget.setGeometry(self.rect())
+        self.fallback_label.setGeometry(self.rect())
+        self.hint_label.setGeometry(self.rect())
+        self.refresh_overlay()
+
+    def load(self, path, video_width, video_height):
+        self.video_width = video_width
+        self.video_height = video_height
+        self.crop = (0, 0, 0, 0)
+        self.hint_label.hide()
+        self.fallback_label.hide()
+        self.video_widget.show()
+        self.player.setSource(QUrl.fromLocalFile(str(path)))
+        self.player.play()
+        for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
+            g.show()
+        for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
+            s.show()
+        self.refresh_overlay()
+
+    def on_player_error(self, _error, error_string):
+        if not self.video_width:
+            return
+        png_bytes = grab_thumbnail(self.player.source().toLocalFile())
+        if not png_bytes:
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png_bytes, "PNG")
+        self.fallback_label.setPixmap(
+            pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+        self.video_widget.hide()
+        self.fallback_label.show()
+
+    def content_rect(self):
+        """Where the video frame is actually drawn within this widget (letterbox/pillarbox-aware)."""
+        if not self.video_width or not self.video_height:
+            return self.rect()
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return self.rect()
+        video_aspect = self.video_width / self.video_height
+        widget_aspect = w / h
+        if widget_aspect > video_aspect:
+            disp_h = h
+            disp_w = int(h * video_aspect)
+        else:
+            disp_w = w
+            disp_h = int(w / video_aspect)
+        x = (w - disp_w) // 2
+        y = (h - disp_h) // 2
+        return QRect(x, y, disp_w, disp_h)
+
+    def set_crop_pixels(self, left, top, right, bottom):
+        self.crop = (left, top, right, bottom)
+        self.refresh_overlay()
+
+    def refresh_overlay(self):
+        if not self.video_width or not self.video_height:
+            return
+        rect = self.content_rect()
+        left, top, right, bottom = self.crop
+        sx = rect.width() / self.video_width
+        sy = rect.height() / self.video_height
+        t = self.THICKNESS
+
+        gx_left = rect.left() + int(left * sx)
+        gx_right = rect.right() - int(right * sx)
+        gy_top = rect.top() + int(top * sy)
+        gy_bottom = rect.bottom() - int(bottom * sy)
+
+        self.guide_left.setGeometry(gx_left - t // 2, rect.top(), t, rect.height())
+        self.guide_right.setGeometry(gx_right - t // 2, rect.top(), t, rect.height())
+        self.guide_top.setGeometry(rect.left(), gy_top - t // 2, rect.width(), t)
+        self.guide_bottom.setGeometry(rect.left(), gy_bottom - t // 2, rect.width(), t)
+
+        self.shade_left.setGeometry(rect.left(), rect.top(), max(0, gx_left - rect.left()), rect.height())
+        self.shade_right.setGeometry(gx_right, rect.top(), max(0, rect.right() - gx_right), rect.height())
+        self.shade_top.setGeometry(rect.left(), rect.top(), rect.width(), max(0, gy_top - rect.top()))
+        self.shade_bottom.setGeometry(rect.left(), gy_bottom, rect.width(), max(0, rect.bottom() - gy_bottom))
+
+        for g in (self.guide_left, self.guide_right, self.guide_top, self.guide_bottom):
+            g.raise_()
+
+    def _guide_dragged(self, which, pos):
+        rect = self.content_rect()
+        sx = rect.width() / self.video_width
+        sy = rect.height() / self.video_height
+        left, top, right, bottom = self.crop
+        if which == "left":
+            left = max(0, min(self.video_width - 1, int((pos - rect.left()) / sx)))
+        elif which == "right":
+            right = max(0, min(self.video_width - 1, int((rect.right() - pos) / sx)))
+        elif which == "top":
+            top = max(0, min(self.video_height - 1, int((pos - rect.top()) / sy)))
+        elif which == "bottom":
+            bottom = max(0, min(self.video_height - 1, int((rect.bottom() - pos) / sy)))
+        self.crop = (left, top, right, bottom)
+        self.refresh_overlay()
+        self.guides_changed.emit(left, top, right, bottom)
+
+
+class Scrubber(QWidget):
+    """Seek bar with a playhead plus draggable start/end trim handles."""
+
+    seek_requested = Signal(float)
+    trim_changed = Signal(float, float)  # absolute start seconds, absolute end seconds
+
+    HANDLE_GRAB = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(28)
+        self.duration = 0.0
+        self.position = 0.0
+        self.trim_start = 0.0
+        self.trim_end = 0.0
+        self._dragging = None
+
+    def set_duration(self, duration):
+        self.duration = duration
+        self.trim_start = 0.0
+        self.trim_end = duration
+        self.update()
+
+    def set_position(self, seconds):
+        self.position = seconds
+        self.update()
+
+    def set_trim(self, start, end):
+        self.trim_start = start
+        self.trim_end = end
+        self.update()
+
+    def x_for_time(self, t):
+        if self.duration <= 0:
+            return 0
+        return int(t / self.duration * self.width())
+
+    def time_for_x(self, x):
+        if self.width() <= 0 or self.duration <= 0:
+            return 0.0
+        return max(0.0, min(self.duration, x / self.width() * self.duration))
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#2a2a2a"))
+        if self.duration > 0:
+            x1 = self.x_for_time(self.trim_start)
+            x2 = self.x_for_time(self.trim_end)
+            painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), QColor("#3a5f8a"))
+            px = self.x_for_time(self.position)
+            painter.fillRect(px - 1, 0, 2, self.height(), QColor("#ffffff"))
+            painter.fillRect(x1 - 2, 0, 4, self.height(), QColor("#7fc7ff"))
+            painter.fillRect(x2 - 2, 0, 4, self.height(), QColor("#7fc7ff"))
+        painter.end()
+
+    def _handle_at(self, x):
+        if self.duration <= 0:
+            return None
+        if abs(x - self.x_for_time(self.trim_start)) <= self.HANDLE_GRAB:
+            return "start"
+        if abs(x - self.x_for_time(self.trim_end)) <= self.HANDLE_GRAB:
+            return "end"
+        return "playhead"
+
+    def mousePressEvent(self, event):
+        x = event.position().toPoint().x()
+        self._dragging = self._handle_at(x)
+        self._drag_to(x)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._drag_to(event.position().toPoint().x())
+
+    def mouseReleaseEvent(self, _event):
+        self._dragging = None
+
+    def _drag_to(self, x):
+        t = self.time_for_x(x)
+        if self._dragging == "start":
+            self.trim_start = max(0.0, min(t, self.trim_end - 0.1))
+            self.trim_changed.emit(self.trim_start, self.trim_end)
+        elif self._dragging == "end":
+            self.trim_end = min(self.duration, max(t, self.trim_start + 0.1))
+            self.trim_changed.emit(self.trim_start, self.trim_end)
+        elif self._dragging == "playhead":
+            self.position = t
+            self.seek_requested.emit(t)
+        self.update()
+
 
 class MainWindow(QMainWindow):
     def __init__(self, initial_path=None):
         super().__init__()
         self.setWindowTitle("ClipCut")
-        self.resize(420, 320)
+        self.resize(900, 600)
 
         self.path = None
         self.video_width = None
@@ -152,24 +445,57 @@ class MainWindow(QMainWindow):
         self.spinner_timer = QTimer(self)
         self.spinner_timer.setInterval(80)
         self.spinner_timer.timeout.connect(self.advance_spinner)
+        self._syncing = False
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        root = QHBoxLayout(central)
 
-        self.drop = DropLabel(self.load_file)
-        layout.addWidget(self.drop)
+        # --- left column: video preview + playback controls ---
+        left = QVBoxLayout()
+        self.preview = VideoPreview(self.load_file)
+        self.preview.guides_changed.connect(self.on_guides_changed)
+        left.addWidget(self.preview, stretch=1)
 
-        layout.addWidget(make_heading("Cut"))
+        controls_row = QHBoxLayout()
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.toggle_playback)
+        self.play_button.setEnabled(False)
+        controls_row.addWidget(self.play_button)
+
+        self.mute_button = QPushButton("Mute")
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.mute_button.setEnabled(False)
+        controls_row.addWidget(self.mute_button)
+
+        self.time_label = QLabel("0:00 / 0:00")
+        controls_row.addWidget(self.time_label)
+        controls_row.addStretch()
+        left.addLayout(controls_row)
+
+        self.scrubber = Scrubber()
+        self.scrubber.seek_requested.connect(self.on_seek_requested)
+        self.scrubber.trim_changed.connect(self.on_trim_changed)
+        left.addWidget(self.scrubber)
+
+        root.addLayout(left, stretch=1)
+
+        # --- right column: existing sidebar controls ---
+        sidebar = QVBoxLayout()
+        sidebar_widget = QWidget()
+        sidebar_widget.setLayout(sidebar)
+        sidebar_widget.setFixedWidth(280)
+
+        sidebar.addWidget(make_heading("Cut"))
         start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
-        layout.addLayout(start_row)
+        sidebar.addLayout(start_row)
         end_row, self.end_h, self.end_m, self.end_s = make_time_row("End:")
-        layout.addLayout(end_row)
+        sidebar.addLayout(end_row)
         self.time_edits = (self.start_h, self.start_m, self.start_s,
                             self.end_h, self.end_m, self.end_s)
 
-        layout.addWidget(make_separator())
-        layout.addWidget(make_heading("Crop"))
+        sidebar.addWidget(make_separator())
+        sidebar.addWidget(make_heading("Crop"))
 
         crop_grid = QGridLayout()
         self.crop_left = QLineEdit()
@@ -188,13 +514,13 @@ class MainWindow(QMainWindow):
         crop_grid.setColumnStretch(0, 1)
         crop_grid.setColumnStretch(1, 1)
         crop_grid.setColumnStretch(2, 1)
-        layout.addLayout(crop_grid)
+        sidebar.addLayout(crop_grid)
         crop_note = QLabel("Cropping requires re-encode (not fully lossless)")
         crop_note.setStyleSheet("color: #999999; font-size: 10px;")
         crop_note.setAlignment(Qt.AlignLeft)
-        layout.addWidget(crop_note)
-        layout.addWidget(make_separator())
-        layout.addWidget(make_heading("Options"))
+        sidebar.addWidget(crop_note)
+        sidebar.addWidget(make_separator())
+        sidebar.addWidget(make_heading("Options"))
 
         options_row = QHBoxLayout()
         self.remove_audio = QCheckBox("Remove audio")
@@ -202,17 +528,19 @@ class MainWindow(QMainWindow):
         self.audio_only = QCheckBox("Audio only")
         options_row.addWidget(self.audio_only)
         options_row.addStretch()
-        layout.addLayout(options_row)
+        sidebar.addLayout(options_row)
 
         suffix_form = QFormLayout()
         self.suffix_edit = QLineEdit()
         suffix_form.addRow("Append text:", self.suffix_edit)
-        layout.addLayout(suffix_form)
+        sidebar.addLayout(suffix_form)
 
         self.remove_audio.toggled.connect(self.on_remove_audio_toggled)
         self.audio_only.toggled.connect(self.on_audio_only_toggled)
-        for widget in self.time_edits + self.crop_edits:
-            widget.textChanged.connect(self.update_suffix_placeholder)
+        for widget in self.time_edits:
+            widget.textChanged.connect(self.on_time_fields_changed)
+        for widget in self.crop_edits:
+            widget.textChanged.connect(self.on_crop_fields_changed)
         self.remove_audio.toggled.connect(self.update_suffix_placeholder)
         self.audio_only.toggled.connect(self.update_suffix_placeholder)
         self.update_suffix_placeholder()
@@ -226,18 +554,24 @@ class MainWindow(QMainWindow):
         self.done_button = QPushButton("Done")
         self.done_button.clicked.connect(self.close)
         button_row.addWidget(self.done_button)
-        layout.addLayout(button_row)
+        sidebar.addLayout(button_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
+        sidebar.addWidget(self.progress_bar)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        sidebar.addWidget(self.status)
+        sidebar.addStretch()
+
+        root.addWidget(sidebar_widget)
 
         self.setAcceptDrops(True)
+
+        self.preview.player.positionChanged.connect(self.on_player_position_changed)
+        self.preview.player.playbackStateChanged.connect(self.on_playback_state_changed)
 
         if initial_path:
             self.load_file(initial_path)
@@ -260,12 +594,101 @@ class MainWindow(QMainWindow):
         self.path = path
         self.video_width, self.video_height = w, h
         self.duration = duration
-        self.drop.setText(f"{path.name}\n{w}x{h}, {duration:.1f}s")
         for field in self.time_edits:
             field.clear()
+        for field in self.crop_edits:
+            field.clear()
         self.process_button.setEnabled(True)
+        self.play_button.setEnabled(True)
+        self.mute_button.setEnabled(True)
         self.status.setText("")
         self.update_suffix_placeholder()
+
+        self.preview.load(path, w, h)
+        self.scrubber.set_duration(duration)
+        self.time_label.setText(f"0:00 / {format_time(duration)}")
+
+    # --- video preview <-> crop field sync ---
+
+    def on_crop_fields_changed(self):
+        self.update_suffix_placeholder()
+        if self._syncing or not self.path:
+            return
+        self._syncing = True
+        try:
+            left = int(self.crop_left.text() or 0)
+            top = int(self.crop_top.text() or 0)
+            right = int(self.crop_right.text() or 0)
+            bottom = int(self.crop_bottom.text() or 0)
+            self.preview.set_crop_pixels(left, top, right, bottom)
+        except ValueError:
+            pass
+        finally:
+            self._syncing = False
+
+    def on_guides_changed(self, left, top, right, bottom):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.crop_left.setText(str(left))
+        self.crop_top.setText(str(top))
+        self.crop_right.setText(str(right))
+        self.crop_bottom.setText(str(bottom))
+        self._syncing = False
+        self.update_suffix_placeholder()
+
+    # --- trim fields <-> scrubber sync ---
+
+    def on_time_fields_changed(self):
+        self.update_suffix_placeholder()
+        if self._syncing or not self.path:
+            return
+        try:
+            start, end = self.get_trim_times()
+        except ValueError:
+            return
+        self._syncing = True
+        self.scrubber.set_trim(start, end)
+        self._syncing = False
+
+    def on_trim_changed(self, start, end):
+        if self._syncing:
+            return
+        self._syncing = True
+        h, m, s = seconds_to_hms(start)
+        self.start_h.setText(str(h))
+        self.start_m.setText(str(m))
+        self.start_s.setText(str(s))
+        h, m, s = seconds_to_hms(self.duration - end)
+        self.end_h.setText(str(h))
+        self.end_m.setText(str(m))
+        self.end_s.setText(str(s))
+        self._syncing = False
+        self.update_suffix_placeholder()
+
+    # --- playback controls ---
+
+    def toggle_playback(self):
+        if self.preview.player.playbackState() == QMediaPlayer.PlayingState:
+            self.preview.player.pause()
+        else:
+            self.preview.player.play()
+
+    def toggle_mute(self):
+        muted = not self.preview.audio_output.isMuted()
+        self.preview.audio_output.setMuted(muted)
+        self.mute_button.setText("Unmute" if muted else "Mute")
+
+    def on_playback_state_changed(self, state):
+        self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+
+    def on_player_position_changed(self, position_ms):
+        seconds = position_ms / 1000
+        self.scrubber.set_position(seconds)
+        self.time_label.setText(f"{format_time(seconds)} / {format_time(self.duration or 0)}")
+
+    def on_seek_requested(self, seconds):
+        self.preview.player.setPosition(int(seconds * 1000))
 
     def on_remove_audio_toggled(self, checked):
         if checked:
