@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QProcess, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -157,7 +157,7 @@ class DropOverlay(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(
             "QLabel { background-color: rgba(20, 20, 20, 210); color: white; "
-            "font-size: 20px; border: 3px dashed #999999; }"
+            "font-size: 20px; border: 3px dashed #999999; border-radius: 12px; }"
         )
         self.setAcceptDrops(True)
         self.hide()
@@ -641,6 +641,10 @@ class MainWindow(QMainWindow):
         root.addWidget(sidebar_widget)
 
         self.setAcceptDrops(True)
+        # QGraphicsView forces drag-accept on its own viewport internally (to support
+        # dragging QGraphicsItems within the scene), which swallows external file drops
+        # before they can bubble up to us. Intercept at the viewport via an event filter.
+        self.preview.viewport().installEventFilter(self)
 
         self.preview.player.positionChanged.connect(self.on_player_position_changed)
         self.preview.player.playbackStateChanged.connect(self.on_playback_state_changed)
@@ -654,12 +658,33 @@ class MainWindow(QMainWindow):
         m = self.OVERLAY_MARGIN
         return self.centralWidget().rect().adjusted(m, m, -m, -m)
 
+    def show_drop_overlay(self):
+        self.drop_overlay.setGeometry(self.overlay_rect())
+        self.drop_overlay.show()
+        self.drop_overlay.raise_()
+
+    def eventFilter(self, obj, event):
+        if obj is self.preview.viewport():
+            if event.type() in (QEvent.DragEnter, QEvent.DragMove):
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    self.show_drop_overlay()
+                    return True
+            elif event.type() == QEvent.Drop:
+                self.drop_overlay.hide()
+                urls = event.mimeData().urls()
+                if urls:
+                    self.load_file(Path(urls[0].toLocalFile()))
+                return True
+            elif event.type() == QEvent.DragLeave:
+                self.drop_overlay.hide()
+                return True
+        return super().eventFilter(obj, event)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
-            self.drop_overlay.setGeometry(self.overlay_rect())
-            self.drop_overlay.show()
-            self.drop_overlay.raise_()
+            self.show_drop_overlay()
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
