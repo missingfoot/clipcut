@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -114,10 +115,27 @@ class MainWindow(QMainWindow):
             row.addStretch()
             return row, h_edit, m_edit, s_edit
 
-        start_row, self.start_h, self.start_m, self.start_s = time_row("Chop off start:")
+        def heading(text):
+            label = QLabel(text)
+            font = label.font()
+            font.setBold(True)
+            label.setFont(font)
+            return label
+
+        def separator():
+            line = QFrame()
+            line.setFrameShape(QFrame.HLine)
+            line.setFrameShadow(QFrame.Sunken)
+            return line
+
+        layout.addWidget(heading("Cut"))
+        start_row, self.start_h, self.start_m, self.start_s = time_row("Start:")
         layout.addLayout(start_row)
-        end_row, self.end_h, self.end_m, self.end_s = time_row("Chop off end:")
+        end_row, self.end_h, self.end_m, self.end_s = time_row("End:")
         layout.addLayout(end_row)
+
+        layout.addWidget(separator())
+        layout.addWidget(heading("Crop"))
 
         def crop_group(label_text, edit):
             group = QWidget()
@@ -135,14 +153,15 @@ class MainWindow(QMainWindow):
         for edit in (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom):
             edit.setMaximumWidth(60)
 
-        crop_grid.addWidget(crop_group("Crop top:", self.crop_top), 0, 0, 1, 3, Qt.AlignCenter)
-        crop_grid.addWidget(crop_group("Crop left:", self.crop_left), 1, 0, Qt.AlignLeft)
-        crop_grid.addWidget(crop_group("Crop right:", self.crop_right), 1, 2, Qt.AlignRight)
-        crop_grid.addWidget(crop_group("Crop bottom:", self.crop_bottom), 2, 0, 1, 3, Qt.AlignCenter)
+        crop_grid.addWidget(crop_group("Top:", self.crop_top), 0, 0, 1, 3, Qt.AlignCenter)
+        crop_grid.addWidget(crop_group("Left:", self.crop_left), 1, 0, Qt.AlignLeft)
+        crop_grid.addWidget(crop_group("Right:", self.crop_right), 1, 2, Qt.AlignRight)
+        crop_grid.addWidget(crop_group("Bottom:", self.crop_bottom), 2, 0, 1, 3, Qt.AlignCenter)
         crop_grid.setColumnStretch(0, 1)
         crop_grid.setColumnStretch(1, 1)
         crop_grid.setColumnStretch(2, 1)
         layout.addLayout(crop_grid)
+        layout.addWidget(separator())
 
         self.remove_audio = QCheckBox("Remove audio")
         layout.addWidget(self.remove_audio)
