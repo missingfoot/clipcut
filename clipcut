@@ -146,8 +146,7 @@ def make_crop_group(label_text, edit):
 
 
 class GuideItem(QGraphicsRectItem):
-    """A draggable crop guide line. Paints in 'difference' blend mode so it stays
-    visible against any underlying color. Calls back with its new scene-coordinate
+    """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
 
     def __init__(self, orientation, on_drag):
@@ -162,8 +161,7 @@ class GuideItem(QGraphicsRectItem):
         self._dragging = False
 
     def paint(self, painter, _option, _widget=None):
-        painter.setCompositionMode(QPainter.CompositionMode_Difference)
-        painter.fillRect(self.rect(), QColor(255, 255, 255))
+        painter.fillRect(self.rect(), QColor(255, 0, 255))
 
     def mousePressEvent(self, event):
         self._dragging = True
