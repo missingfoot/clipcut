@@ -63,7 +63,7 @@ class DropLabel(QLabel):
         self.setAcceptDrops(True)
         self.setMinimumHeight(80)
         self.setStyleSheet(
-            "QLabel { border: 2px dashed #999999; border-radius: 6px; padding: 8px; }"
+            "QLabel { border: 1px dashed #999999; border-radius: 6px; padding: 8px; }"
         )
 
     def dragEnterEvent(self, event):
@@ -126,8 +126,8 @@ class MainWindow(QMainWindow):
 
         def separator():
             line = QFrame()
-            line.setFrameShape(QFrame.HLine)
-            line.setFrameShadow(QFrame.Sunken)
+            line.setFixedHeight(1)
+            line.setStyleSheet("background-color: #999999; border: none;")
             return line
 
         layout.addWidget(heading("Cut"))
