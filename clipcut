@@ -720,6 +720,9 @@ class MainWindow(QMainWindow):
         options_row.addStretch()
         sidebar.addLayout(options_row)
 
+        sidebar.addStretch()
+        sidebar.addWidget(make_separator())
+
         suffix_form = QFormLayout()
         self.suffix_edit = QLineEdit()
         suffix_form.addRow("Append text:", self.suffix_edit)
@@ -756,7 +759,6 @@ class MainWindow(QMainWindow):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         sidebar.addWidget(self.status)
-        sidebar.addStretch()
 
         root.addWidget(sidebar_widget)
 
