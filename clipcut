@@ -641,6 +641,7 @@ class MainWindow(QMainWindow):
             sidebar_outer.addWidget(make_separator())
 
         sidebar = new_sidebar_section()
+        sidebar.setContentsMargins(12, 12, 12, 12)
 
         self.filename_label = QLabel("Drag and drop or choose a file")
         self.filename_label.setWordWrap(True)
