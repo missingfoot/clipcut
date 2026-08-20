@@ -169,6 +169,40 @@ class DropLabel(QLabel):
             self.on_drop(Path(urls[0].toLocalFile()))
 
 
+class DropOverlay(QLabel):
+    """Full-window phantom drop target, upload-site style: hidden until a drag enters
+    the window (shown by the parent's dragEnterEvent), then covers everything so a
+    drop lands correctly no matter which widget is underneath the cursor."""
+
+    def __init__(self, on_drop, parent):
+        super().__init__("Drop video file to load", parent)
+        self.on_drop = on_drop
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            "QLabel { background-color: rgba(20, 20, 20, 210); color: white; "
+            "font-size: 20px; border: 3px dashed #999999; }"
+        )
+        self.setAcceptDrops(True)
+        self.hide()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, _event):
+        self.hide()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        self.hide()
+        if urls:
+            self.on_drop(Path(urls[0].toLocalFile()))
+
+
 class GuideItem(QGraphicsRectItem):
     """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
@@ -221,8 +255,9 @@ class VideoPreview(QGraphicsView):
     def __init__(self, on_drop, parent=None):
         super().__init__(parent)
         self.on_drop = on_drop
-        self.setAcceptDrops(True)
-        self.viewport().setAcceptDrops(True)
+        # Deliberately does NOT accept drops itself: Qt only bubbles unclaimed drag
+        # events up to an accepting ancestor, so this widget must stay out of the way
+        # for the window-level phantom drop overlay to receive them.
         self.setMinimumSize(320, 240)
         self.setStyleSheet("background-color: #000000; border: none;")
         self.setFrameShape(QFrame.NoFrame)
@@ -271,15 +306,6 @@ class VideoPreview(QGraphicsView):
             s.setZValue(5)
             self.gscene.addItem(s)
             s.hide()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        if urls:
-            self.on_drop(Path(urls[0].toLocalFile()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -510,11 +536,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
+        self.drop_overlay = DropOverlay(self.load_file, central)
+
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
-        self.drop_label = DropLabel(self.load_file)
-        left.addWidget(self.drop_label)
-
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
         left.addWidget(self.preview, stretch=1)
@@ -547,6 +572,9 @@ class MainWindow(QMainWindow):
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setFixedWidth(280)
+
+        self.drop_label = DropLabel(self.load_file)
+        sidebar.addWidget(self.drop_label)
 
         sidebar.addWidget(make_heading("Cut"))
         start_row, self.start_h, self.start_m, self.start_s = make_time_row("Start:")
@@ -641,11 +669,19 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            self.drop_overlay.setGeometry(self.centralWidget().rect())
+            self.drop_overlay.show()
+            self.drop_overlay.raise_()
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
             self.load_file(Path(urls[0].toLocalFile()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.drop_overlay.isVisible():
+            self.drop_overlay.setGeometry(self.centralWidget().rect())
 
     def load_file(self, path):
         try:
