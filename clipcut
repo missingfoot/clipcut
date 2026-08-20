@@ -387,10 +387,13 @@ class VideoPreview(QGraphicsView):
         gy_top = rect.top() + int(top * sy)
         gy_bottom = rect.bottom() - int(bottom * sy)
 
-        self.guide_left.setRect(gx_left - t / 2, 0, t, full.height())
-        self.guide_right.setRect(gx_right - t / 2, 0, t, full.height())
-        self.guide_top.setRect(0, gy_top - t / 2, full.width(), t)
-        self.guide_bottom.setRect(0, gy_bottom - t / 2, full.width(), t)
+        # Placed at whole-pixel coordinates (not centered with a t/2 half-pixel offset)
+        # so a 1px line lands crisply on one pixel instead of blurring across two under
+        # antialiasing.
+        self.guide_left.setRect(gx_left, 0, t, full.height())
+        self.guide_right.setRect(gx_right, 0, t, full.height())
+        self.guide_top.setRect(0, gy_top, full.width(), t)
+        self.guide_bottom.setRect(0, gy_bottom, full.width(), t)
         self.guide_left.set_active(left > 0)
         self.guide_right.set_active(right > 0)
         self.guide_top.set_active(top > 0)
