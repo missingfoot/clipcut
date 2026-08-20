@@ -117,6 +117,14 @@ class MainWindow(QMainWindow):
         form.addRow("Chop off end (secs):", self.end_edit)
         layout.addLayout(form)
 
+        def crop_group(label_text, edit):
+            group = QWidget()
+            h = QHBoxLayout(group)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.addWidget(QLabel(label_text))
+            h.addWidget(edit)
+            return group
+
         crop_grid = QGridLayout()
         self.crop_left = QLineEdit("0")
         self.crop_top = QLineEdit("0")
@@ -125,16 +133,13 @@ class MainWindow(QMainWindow):
         for edit in (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom):
             edit.setMaximumWidth(60)
 
-        crop_grid.addWidget(QLabel("Crop top:"), 0, 0, Qt.AlignRight)
-        crop_grid.addWidget(self.crop_top, 0, 1, 1, 3)
-
-        crop_grid.addWidget(QLabel("Crop left:"), 1, 0, Qt.AlignRight)
-        crop_grid.addWidget(self.crop_left, 1, 1)
-        crop_grid.addWidget(QLabel("right:"), 1, 2, Qt.AlignRight)
-        crop_grid.addWidget(self.crop_right, 1, 3)
-
-        crop_grid.addWidget(QLabel("Crop bottom:"), 2, 0, Qt.AlignRight)
-        crop_grid.addWidget(self.crop_bottom, 2, 1, 1, 3)
+        crop_grid.addWidget(crop_group("Crop top:", self.crop_top), 0, 0, 1, 3, Qt.AlignCenter)
+        crop_grid.addWidget(crop_group("Crop left:", self.crop_left), 1, 0, Qt.AlignLeft)
+        crop_grid.addWidget(crop_group("Crop right:", self.crop_right), 1, 2, Qt.AlignRight)
+        crop_grid.addWidget(crop_group("Crop bottom:", self.crop_bottom), 2, 0, 1, 3, Qt.AlignCenter)
+        crop_grid.setColumnStretch(0, 1)
+        crop_grid.setColumnStretch(1, 1)
+        crop_grid.setColumnStretch(2, 1)
         layout.addLayout(crop_grid)
 
         self.remove_audio = QCheckBox("Remove audio")
