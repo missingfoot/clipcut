@@ -529,7 +529,7 @@ class MainWindow(QMainWindow):
 
         # --- left column: video preview + playback controls ---
         left = QVBoxLayout()
-        left.setContentsMargins(0, 0, 0, 0)
+        left.setContentsMargins(0, 1, 0, 0)
         left.setSpacing(0)
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
