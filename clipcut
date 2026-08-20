@@ -153,35 +153,21 @@ def make_crop_group(label_text, edit):
     return group
 
 
-class DropOverlay(QWidget):
+class DropOverlay(QLabel):
     """Full-window phantom drop target, upload-site style: hidden until a drag enters
-    the window (shown by the parent's dragEnterEvent), then covers everything edge-to-edge
-    so a drop lands correctly no matter which widget is underneath the cursor.
-
-    The dashed box is a purely decorative, mouse-transparent child inset within this
-    widget - kept separate from the actual (full-size) drop-accepting hit area, so cursor
-    jitter near the inset border can't flicker the overlay in and out during a drag."""
-
-    MARGIN = 24
+    the window (shown by the parent's dragEnterEvent), then covers everything so a
+    drop lands correctly no matter which widget is underneath the cursor."""
 
     def __init__(self, on_drop, parent):
-        super().__init__(parent)
+        super().__init__("Drop video file to load", parent)
         self.on_drop = on_drop
-        self.setStyleSheet("background-color: rgba(20, 20, 20, 210);")
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            "QLabel { background-color: rgba(20, 20, 20, 210); color: white; "
+            "font-size: 20px; border: 3px dashed #999999; border-radius: 12px; }"
+        )
         self.setAcceptDrops(True)
         self.hide()
-
-        self.box = QLabel("Drop video file to load", self)
-        self.box.setAlignment(Qt.AlignCenter)
-        self.box.setStyleSheet(
-            "QLabel { color: white; font-size: 20px; border: 3px dashed #999999; "
-            "border-radius: 12px; background: transparent; }"
-        )
-        self.box.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.box.setGeometry(self.rect().adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN))
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -692,8 +678,14 @@ class MainWindow(QMainWindow):
         if initial_path:
             self.load_file(initial_path)
 
+    OVERLAY_MARGIN = 24
+
+    def overlay_rect(self):
+        m = self.OVERLAY_MARGIN
+        return self.centralWidget().rect().adjusted(m, m, -m, -m)
+
     def show_drop_overlay(self):
-        self.drop_overlay.setGeometry(self.centralWidget().rect())
+        self.drop_overlay.setGeometry(self.overlay_rect())
         self.drop_overlay.show()
         self.drop_overlay.raise_()
 
@@ -728,7 +720,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.drop_overlay.isVisible():
-            self.drop_overlay.setGeometry(self.centralWidget().rect())
+            self.drop_overlay.setGeometry(self.overlay_rect())
 
     def browse_for_file(self):
         filename, _filter = QFileDialog.getOpenFileName(self, "Open video", str(Path.home()), "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)")
