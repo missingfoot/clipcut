@@ -111,6 +111,23 @@ def seconds_to_hms(total_seconds):
     return h, m, s
 
 
+def seconds_to_hms_precise(total_seconds):
+    """Like seconds_to_hms, but keeps sub-second precision in the seconds component
+    (needed so a keyframe-snapped time doesn't get rounded away in the trim fields)."""
+    total_seconds = max(0.0, total_seconds)
+    h = int(total_seconds // 3600)
+    rem = total_seconds - h * 3600
+    m = int(rem // 60)
+    s = rem - m * 60
+    return h, m, s
+
+
+def format_seconds_field(s):
+    if abs(s - round(s)) < 1e-6:
+        return str(int(round(s)))
+    return f"{s:.3f}".rstrip("0").rstrip(".")
+
+
 def format_time(seconds):
     h, m, s = seconds_to_hms(seconds)
     if h:
@@ -129,9 +146,9 @@ def make_time_row(label_text):
     m_edit = NumberLineEdit()
     m_edit.setPlaceholderText("0")
     m_edit.setMaximumWidth(40)
-    s_edit = NumberLineEdit()
+    s_edit = NumberLineEdit(allow_decimal=True)
     s_edit.setPlaceholderText("0")
-    s_edit.setMaximumWidth(40)
+    s_edit.setMaximumWidth(60)
     row.addWidget(h_edit)
     row.addWidget(QLabel("h"))
     row.addSpacing(12)
@@ -192,14 +209,21 @@ def make_crop_group(label_text, edit):
 
 
 class NumberLineEdit(QLineEdit):
-    """A QLineEdit for a non-negative integer that scrolling increments/decrements:
-    1 per wheel notch, 10 per notch while Shift is held."""
+    """A QLineEdit for a non-negative number that scrolling increments/decrements:
+    1 per wheel notch, 10 per notch while Shift is held. With allow_decimal, values
+    keep any fractional part (needed for keyframe-precise seconds) instead of
+    truncating to whole numbers."""
+
+    def __init__(self, allow_decimal=False, parent=None):
+        super().__init__(parent)
+        self.allow_decimal = allow_decimal
 
     def wheelEvent(self, event):
         step = 10 if event.modifiers() & Qt.ShiftModifier else 1
         direction = 1 if event.angleDelta().y() > 0 else -1
-        current = int(self.text() or self.placeholderText() or 0)
-        self.setText(str(max(0, current + step * direction)))
+        current = float(self.text() or self.placeholderText() or 0)
+        new_value = max(0.0, current + step * direction)
+        self.setText(format_seconds_field(new_value) if self.allow_decimal else str(int(new_value)))
         event.accept()
 
 
@@ -953,14 +977,14 @@ class MainWindow(QMainWindow):
                 self.start_frame_edit.setText(str(round(start * fps)))
                 self.end_frame_edit.setText(str(round(end * fps)))
             else:
-                h, m, s = seconds_to_hms(start)
+                h, m, s = seconds_to_hms_precise(start)
                 self.start_h.setText(str(h))
                 self.start_m.setText(str(m))
-                self.start_s.setText(str(s))
-                h, m, s = seconds_to_hms(self.duration - end)
+                self.start_s.setText(format_seconds_field(s))
+                h, m, s = seconds_to_hms_precise(self.duration - end)
                 self.end_h.setText(str(h))
                 self.end_m.setText(str(m))
-                self.end_s.setText(str(s))
+                self.end_s.setText(format_seconds_field(s))
             self._syncing = False
         self.update_suffix_placeholder()
 
@@ -975,14 +999,14 @@ class MainWindow(QMainWindow):
             self.start_frame_edit.setText(str(round(start * fps)))
             self.end_frame_edit.setText(str(round(end * fps)))
         else:
-            h, m, s = seconds_to_hms(start)
+            h, m, s = seconds_to_hms_precise(start)
             self.start_h.setText(str(h))
             self.start_m.setText(str(m))
-            self.start_s.setText(str(s))
-            h, m, s = seconds_to_hms(self.duration - end)
+            self.start_s.setText(format_seconds_field(s))
+            h, m, s = seconds_to_hms_precise(self.duration - end)
             self.end_h.setText(str(h))
             self.end_m.setText(str(m))
-            self.end_s.setText(str(s))
+            self.end_s.setText(format_seconds_field(s))
         self._syncing = False
         self.update_suffix_placeholder()
 
@@ -1028,10 +1052,10 @@ class MainWindow(QMainWindow):
             fps = self.video_fps or 30.0
             self.start_frame_edit.setText(str(round(snapped * fps)))
             return
-        h, m, s = seconds_to_hms(snapped)
+        h, m, s = seconds_to_hms_precise(snapped)
         self.start_h.setText(str(h))
         self.start_m.setText(str(m))
-        self.start_s.setText(str(s))
+        self.start_s.setText(format_seconds_field(s))
 
     def set_end_from_playhead(self):
         snapped = self.snap_time(self.scrubber.position, is_start=False)
@@ -1039,10 +1063,10 @@ class MainWindow(QMainWindow):
             fps = self.video_fps or 30.0
             self.end_frame_edit.setText(str(round(snapped * fps)))
             return
-        h, m, s = seconds_to_hms((self.duration or 0) - snapped)
+        h, m, s = seconds_to_hms_precise((self.duration or 0) - snapped)
         self.end_h.setText(str(h))
         self.end_m.setText(str(m))
-        self.end_s.setText(str(s))
+        self.end_s.setText(format_seconds_field(s))
 
     def on_playback_state_changed(self, state):
         self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
@@ -1069,7 +1093,7 @@ class MainWindow(QMainWindow):
     def hms_to_seconds(h_edit, m_edit, s_edit):
         h = int(h_edit.text() or 0)
         m = int(m_edit.text() or 0)
-        s = int(s_edit.text() or 0)
+        s = float(s_edit.text() or 0)
         if h < 0 or m < 0 or s < 0:
             raise ValueError("time fields must be >= 0")
         return h * 3600 + m * 60 + s
