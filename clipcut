@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -52,6 +53,14 @@ def next_available(path):
         if not candidate.exists():
             return candidate
         n += 1
+
+
+def parse_out_time_seconds(line):
+    """Parse an ffmpeg -progress 'out_time=HH:MM:SS.ffffff' line into seconds, or None."""
+    if not line.startswith("out_time="):
+        return None
+    h, m, s = line[len("out_time="):].split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
 
 
 def make_time_row(label_text):
@@ -136,6 +145,8 @@ class MainWindow(QMainWindow):
         self.video_height = None
         self.duration = None
         self.process = None
+        self.progress_target_duration = 0
+        self.progress_buffer = ""
         self.spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         self.spinner_index = 0
         self.spinner_timer = QTimer(self)
@@ -216,6 +227,11 @@ class MainWindow(QMainWindow):
         self.done_button.clicked.connect(self.close)
         button_row.addWidget(self.done_button)
         layout.addLayout(button_row)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -319,15 +335,16 @@ class MainWindow(QMainWindow):
         self.suffix_edit.setPlaceholderText(self.compute_default_suffix())
 
     def build_command(self):
-        """Return (cmd, out_path). Raises ValueError on bad input."""
+        """Return (cmd, out_path, target_duration). Raises ValueError on bad input."""
         start, end = self.get_trim_times()
+        target_duration = end - start
         append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
-        cmd = ["ffmpeg", "-y", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
+        cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
 
         if self.audio_only.isChecked():
             out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}.m4a"))
             cmd += ["-vn", "-c:a", "copy", str(out_path)]
-            return cmd, out_path
+            return cmd, out_path, target_duration
 
         left, top, crop_w, crop_h, has_crop = self.get_crop()
         out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
@@ -338,39 +355,59 @@ class MainWindow(QMainWindow):
             cmd += ["-c:v", "copy"]
         cmd += ["-an"] if self.remove_audio.isChecked() else ["-c:a", "copy"]
         cmd.append(str(out_path))
-        return cmd, out_path
+        return cmd, out_path, target_duration
 
     def advance_spinner(self):
         frame = self.spinner_frames[self.spinner_index]
         self.spinner_index = (self.spinner_index + 1) % len(self.spinner_frames)
-        self.status.setText(f"{frame} Working...")
+        self.status.setText(f"{frame} Working... {self.progress_bar.value()}%")
+
+    def on_process_output(self):
+        if self.progress_target_duration <= 0:
+            self.process.readAllStandardOutput()
+            return
+        data = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
+        self.progress_buffer += data
+        *complete_lines, self.progress_buffer = self.progress_buffer.split("\n")
+        for line in complete_lines:
+            seconds = parse_out_time_seconds(line.strip())
+            if seconds is not None:
+                pct = max(0, min(100, int(seconds / self.progress_target_duration * 100)))
+                self.progress_bar.setValue(pct)
 
     def do_process(self):
         try:
-            cmd, out_path = self.build_command()
+            cmd, out_path, target_duration = self.build_command()
         except ValueError as e:
             self.status.setText(f"Invalid input: {e}")
             return
 
         self.pending_out_path = out_path
+        self.progress_target_duration = target_duration
+        self.progress_buffer = ""
         self.process_button.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
         self.spinner_index = 0
         self.advance_spinner()
         self.spinner_timer.start()
 
         self.process = QProcess(self)
+        self.process.readyReadStandardOutput.connect(self.on_process_output)
         self.process.finished.connect(self.on_process_finished)
         self.process.errorOccurred.connect(self.on_process_error)
         self.process.start(cmd[0], cmd[1:])
 
     def on_process_error(self, _error):
         self.spinner_timer.stop()
+        self.progress_bar.setVisible(False)
         self.process_button.setEnabled(True)
         self.status.setText(f"Failed to launch ffmpeg: {self.process.errorString()}")
         self.process = None
 
     def on_process_finished(self, exit_code, _exit_status):
         self.spinner_timer.stop()
+        self.progress_bar.setVisible(False)
         self.process_button.setEnabled(True)
         stderr = bytes(self.process.readAllStandardError()).decode(errors="replace")
         self.process = None
