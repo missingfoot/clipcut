@@ -530,18 +530,12 @@ class MainWindow(QMainWindow):
         below_preview.addWidget(self.scrubber)
 
         controls_row = QHBoxLayout()
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.toggle_playback)
-        self.play_button.setEnabled(False)
-        controls_row.addWidget(self.play_button)
 
         self.mute_button = QPushButton("Unmute")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setEnabled(False)
         controls_row.addWidget(self.mute_button)
 
-        self.time_label = QLabel("0:00 / 0:00")
-        controls_row.addWidget(self.time_label)
         controls_row.addStretch()
 
         self.set_start_button = QPushButton("Set Start")
@@ -549,10 +543,30 @@ class MainWindow(QMainWindow):
         self.set_start_button.setEnabled(False)
         controls_row.addWidget(self.set_start_button)
 
+        self.step_back_button = QPushButton("<<")
+        self.step_back_button.clicked.connect(self.step_back)
+        self.step_back_button.setEnabled(False)
+        controls_row.addWidget(self.step_back_button)
+
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.toggle_playback)
+        self.play_button.setEnabled(False)
+        controls_row.addWidget(self.play_button)
+
+        self.step_forward_button = QPushButton(">>")
+        self.step_forward_button.clicked.connect(self.step_forward)
+        self.step_forward_button.setEnabled(False)
+        controls_row.addWidget(self.step_forward_button)
+
         self.set_end_button = QPushButton("Set End")
         self.set_end_button.clicked.connect(self.set_end_from_playhead)
         self.set_end_button.setEnabled(False)
         controls_row.addWidget(self.set_end_button)
+
+        controls_row.addStretch()
+
+        self.time_label = QLabel("0:00 / 0:00")
+        controls_row.addWidget(self.time_label)
 
         below_preview.addLayout(controls_row)
 
@@ -727,6 +741,8 @@ class MainWindow(QMainWindow):
             field.clear()
         self.process_button.setEnabled(True)
         self.play_button.setEnabled(True)
+        self.step_back_button.setEnabled(True)
+        self.step_forward_button.setEnabled(True)
         self.mute_button.setEnabled(True)
         self.remove_file_button.setEnabled(True)
         self.set_start_button.setEnabled(True)
@@ -751,6 +767,8 @@ class MainWindow(QMainWindow):
             field.clear()
         self.process_button.setEnabled(False)
         self.play_button.setEnabled(False)
+        self.step_back_button.setEnabled(False)
+        self.step_forward_button.setEnabled(False)
         self.mute_button.setEnabled(False)
         self.remove_file_button.setEnabled(False)
         self.set_start_button.setEnabled(False)
@@ -827,6 +845,16 @@ class MainWindow(QMainWindow):
             self.preview.player.pause()
         else:
             self.preview.player.play()
+
+    STEP_SECONDS = 1.0
+
+    def step_back(self):
+        new_pos = max(0.0, self.scrubber.position - self.STEP_SECONDS)
+        self.preview.player.setPosition(int(new_pos * 1000))
+
+    def step_forward(self):
+        new_pos = min(self.duration or 0.0, self.scrubber.position + self.STEP_SECONDS)
+        self.preview.player.setPosition(int(new_pos * 1000))
 
     def toggle_mute(self):
         muted = not self.preview.audio_output.isMuted()
