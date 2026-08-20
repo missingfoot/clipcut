@@ -38,7 +38,7 @@ def probe(path):
         [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height:format=duration",
+            "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
             "-of", "json",
             str(path),
         ],
@@ -49,7 +49,9 @@ def probe(path):
     data = json.loads(out.stdout)
     stream = data["streams"][0]
     duration = float(data["format"]["duration"])
-    return int(stream["width"]), int(stream["height"]), duration
+    num, _, den = stream["avg_frame_rate"].partition("/")
+    fps = int(num) / int(den) if int(den or 0) else 30.0
+    return int(stream["width"]), int(stream["height"]), duration, fps
 
 
 def grab_thumbnail(path):
@@ -506,6 +508,7 @@ class MainWindow(QMainWindow):
         self.video_width = None
         self.video_height = None
         self.duration = None
+        self.video_fps = None
         self.process = None
         self.progress_target_duration = 0
         self.progress_buffer = ""
@@ -618,6 +621,15 @@ class MainWindow(QMainWindow):
         sidebar.addLayout(end_row)
         self.time_edits = (self.start_h, self.start_m, self.start_s,
                             self.end_h, self.end_m, self.end_s)
+
+        self.frame_accurate = QCheckBox("Frame-accurate cut")
+        self.frame_accurate.toggled.connect(self.update_suffix_placeholder)
+        sidebar.addWidget(self.frame_accurate)
+        frame_accurate_note = QLabel("Frame-accurate cutting requires re-encode (not fully lossless)")
+        frame_accurate_note.setStyleSheet("color: #999999; font-size: 10px;")
+        frame_accurate_note.setAlignment(Qt.AlignLeft)
+        frame_accurate_note.setWordWrap(True)
+        sidebar.addWidget(frame_accurate_note)
 
         sidebar.addWidget(make_separator())
         sidebar.addWidget(make_heading("Crop"))
@@ -738,13 +750,14 @@ class MainWindow(QMainWindow):
 
     def load_file(self, path):
         try:
-            w, h, duration = probe(path)
+            w, h, duration, fps = probe(path)
         except Exception as e:
             self.status.setText(f"Failed to read file: {e}")
             return
         self.path = path
         self.video_width, self.video_height = w, h
         self.duration = duration
+        self.video_fps = fps
         self.filename_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
         self.browse_button.setText("Replace File...")
         for field in self.time_edits:
@@ -771,6 +784,7 @@ class MainWindow(QMainWindow):
         self.video_width = None
         self.video_height = None
         self.duration = None
+        self.video_fps = None
         self.filename_label.setText("Drag and drop or choose a file")
         self.browse_button.setText("Browse...")
         for field in self.time_edits:
@@ -858,14 +872,15 @@ class MainWindow(QMainWindow):
         else:
             self.preview.player.play()
 
-    STEP_SECONDS = 1.0
+    def frame_duration(self):
+        return 1.0 / self.video_fps if self.video_fps else 1.0
 
     def step_back(self):
-        new_pos = max(0.0, self.scrubber.position - self.STEP_SECONDS)
+        new_pos = max(0.0, self.scrubber.position - self.frame_duration())
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def step_forward(self):
-        new_pos = min(self.duration or 0.0, self.scrubber.position + self.STEP_SECONDS)
+        new_pos = min(self.duration or 0.0, self.scrubber.position + self.frame_duration())
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def toggle_mute(self):
@@ -958,6 +973,8 @@ class MainWindow(QMainWindow):
             parts.append("no_audio")
         if trimmed or not parts:
             parts.append("cut")
+        if self.frame_accurate.isChecked():
+            parts.append("exact")
         return "_".join(parts)
 
     def update_suffix_placeholder(self):
@@ -980,6 +997,8 @@ class MainWindow(QMainWindow):
         if has_crop:
             cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
                     "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
+        elif self.frame_accurate.isChecked():
+            cmd += ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
         else:
             cmd += ["-c:v", "copy"]
         cmd += ["-an"] if self.remove_audio.isChecked() else ["-c:a", "copy"]
