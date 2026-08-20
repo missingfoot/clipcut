@@ -996,12 +996,30 @@ class MainWindow(QMainWindow):
     def frame_duration(self):
         return 1.0 / self.video_fps if self.video_fps else 1.0
 
+    def prev_keyframe_time(self, t):
+        if not self.keyframe_times:
+            return 0.0
+        idx = bisect.bisect_left(self.keyframe_times, t) - 1
+        return self.keyframe_times[max(0, idx)]
+
+    def next_keyframe_time(self, t):
+        if not self.keyframe_times:
+            return t
+        idx = bisect.bisect_right(self.keyframe_times, t)
+        return self.keyframe_times[min(len(self.keyframe_times) - 1, idx)]
+
     def step_back(self):
-        new_pos = max(0.0, self.scrubber.position - self.frame_duration())
+        if self.frame_mode:
+            new_pos = max(0.0, self.scrubber.position - self.frame_duration())
+        else:
+            new_pos = self.prev_keyframe_time(self.scrubber.position)
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def step_forward(self):
-        new_pos = min(self.duration or 0.0, self.scrubber.position + self.frame_duration())
+        if self.frame_mode:
+            new_pos = min(self.duration or 0.0, self.scrubber.position + self.frame_duration())
+        else:
+            new_pos = self.next_keyframe_time(self.scrubber.position)
         self.preview.player.setPosition(int(new_pos * 1000))
 
     def toggle_mute(self):
