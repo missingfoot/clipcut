@@ -631,6 +631,7 @@ class MainWindow(QMainWindow):
         def new_sidebar_section():
             section = QVBoxLayout()
             section.setContentsMargins(12, 8, 12, 8)
+            section.setSpacing(8)
             sidebar_outer.addLayout(section)
             return section
 
