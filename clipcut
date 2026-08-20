@@ -477,9 +477,9 @@ class Scrubber(QWidget):
                 kx = self.x_for_time(kf)
                 painter.fillRect(kx, 0, 1, self.height(), QColor(255, 255, 255, 90))
             px = self.x_for_time(self.position)
-            painter.fillRect(px - 1, 0, 2, self.height(), QColor("#ffffff"))
-            painter.fillRect(x1 - 2, 0, 4, self.height(), QColor("#7fc7ff"))
-            painter.fillRect(x2 - 2, 0, 4, self.height(), QColor("#7fc7ff"))
+            painter.fillRect(px, 0, 1, self.height(), QColor("#ffffff"))
+            painter.fillRect(x1, 0, 1, self.height(), QColor("#7fc7ff"))
+            painter.fillRect(x2, 0, 1, self.height(), QColor("#7fc7ff"))
         painter.end()
 
     def _handle_at(self, x):
