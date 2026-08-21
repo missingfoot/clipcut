@@ -566,6 +566,11 @@ class MainWindow(QMainWindow):
         self.process = None
         self.progress_target_duration = 0
         self.progress_buffer = ""
+        self.spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.spinner_index = 0
+        self.spinner_timer = QTimer(self)
+        self.spinner_timer.setInterval(80)
+        self.spinner_timer.timeout.connect(self.advance_spinner)
         self._syncing = False
 
         central = QWidget()
@@ -1267,6 +1272,11 @@ class MainWindow(QMainWindow):
         cmd.append(str(out_path))
         return cmd, out_path, target_duration
 
+    def advance_spinner(self):
+        frame = self.spinner_frames[self.spinner_index]
+        self.spinner_index = (self.spinner_index + 1) % len(self.spinner_frames)
+        self.status.setText(f"{frame} Working... {self.progress_bar.value()}%")
+
     def on_process_output(self):
         if self.progress_target_duration <= 0:
             self.process.readAllStandardOutput()
@@ -1295,7 +1305,9 @@ class MainWindow(QMainWindow):
         self.process_button.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        self.status.setText("Working...")
+        self.spinner_index = 0
+        self.advance_spinner()
+        self.spinner_timer.start()
 
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.on_process_output)
@@ -1322,12 +1334,14 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def on_process_error(self, _error):
+        self.spinner_timer.stop()
         self.progress_bar.setVisible(False)
         self.process_button.setEnabled(True)
         self.report_error("Failed to launch ffmpeg", self.process.errorString())
         self.process = None
 
     def on_process_finished(self, exit_code, _exit_status):
+        self.spinner_timer.stop()
         self.progress_bar.setVisible(False)
         self.process_button.setEnabled(True)
         stderr = bytes(self.process.readAllStandardError()).decode(errors="replace")
