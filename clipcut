@@ -192,9 +192,10 @@ class GuideItem(QGraphicsRectItem):
     INACTIVE_COLOR = QColor(255, 255, 255, 60)
     HIT_PADDING = 5  # grabbable area extends this far past the 1px visual line on each side
 
-    def __init__(self, orientation, on_drag, on_double_click):
+    def __init__(self, orientation, on_press, on_drag, on_double_click):
         super().__init__()
         self.orientation = orientation  # 'h' (drags vertically) or 'v' (drags horizontally)
+        self.on_press = on_press
         self.on_drag = on_drag
         self.on_double_click = on_double_click
         self.setCursor(Qt.SizeVerCursor if orientation == "h" else Qt.SizeHorCursor)
@@ -226,6 +227,7 @@ class GuideItem(QGraphicsRectItem):
 
     def mousePressEvent(self, event):
         self._dragging = True
+        self.on_press()
         event.accept()
 
     def mouseMoveEvent(self, event):
@@ -354,10 +356,15 @@ class VideoPreview(QGraphicsView):
         # dropping it - only an explicit single-guide drag to 0 or a double-click reset
         # actually removes a guide.
         self.guide_active = {"left": False, "top": False, "right": False, "bottom": False}
-        # Set while an aspect-ratio preset is active (width/height float, or None when
-        # "Free"): constrains the corner handles to a proportional scale instead of a
-        # free two-edge resize, so a preset acts as a lock against accidental drift.
+        # Width/height of the selected aspect-ratio preset, or None for "Free" - the
+        # ratio a locked edit targets when one is set; otherwise a locked edit preserves
+        # whatever ratio the box already has. See _effective_ratio and lock_aspect below.
         self.locked_ratio = None
+        # Master switch (the "Lock Aspect Ratio" checkbox): when on, every interactive
+        # edit - guide drag, field edit, corner drag, double-click reset - is routed
+        # through _resize_locked to keep the box's ratio fixed; when off, every one of
+        # them behaves as an independent free edit, exactly as if this feature didn't exist.
+        self.lock_aspect = True
         self.zoom_actual = False
         self.pan_x = 0.0
         self.pan_y = 0.0
@@ -382,13 +389,13 @@ class VideoPreview(QGraphicsView):
         self.hint_item = self.gscene.addSimpleText("Drop video here")
         self.hint_item.setBrush(QColor("#999999"))
 
-        self.guide_top = GuideItem("h", lambda y: self._guide_dragged("top", y),
+        self.guide_top = GuideItem("h", self._crop_move_start, lambda y: self._guide_dragged("top", y),
                                     lambda: self._guide_reset("top"))
-        self.guide_bottom = GuideItem("h", lambda y: self._guide_dragged("bottom", y),
+        self.guide_bottom = GuideItem("h", self._crop_move_start, lambda y: self._guide_dragged("bottom", y),
                                        lambda: self._guide_reset("bottom"))
-        self.guide_left = GuideItem("v", lambda x: self._guide_dragged("left", x),
+        self.guide_left = GuideItem("v", self._crop_move_start, lambda x: self._guide_dragged("left", x),
                                      lambda: self._guide_reset("left"))
-        self.guide_right = GuideItem("v", lambda x: self._guide_dragged("right", x),
+        self.guide_right = GuideItem("v", self._crop_move_start, lambda x: self._guide_dragged("right", x),
                                       lambda: self._guide_reset("right"))
         for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
             self.gscene.addItem(g)
@@ -417,6 +424,17 @@ class VideoPreview(QGraphicsView):
             s.setZValue(5)
             self.gscene.addItem(s)
             s.hide()
+
+        self.show_center = False
+        self.center_h = QGraphicsRectItem()
+        self.center_v = QGraphicsRectItem()
+        for c in (self.center_h, self.center_v):
+            c.setBrush(QColor(255, 255, 255, 90))
+            c.setPen(Qt.NoPen)
+            c.setZValue(6)
+            c.setAcceptedMouseButtons(Qt.NoButton)
+            self.gscene.addItem(c)
+            c.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -517,6 +535,8 @@ class VideoPreview(QGraphicsView):
         self.crop_move.hide()
         for c in self.corners:
             c.hide()
+        self.center_h.hide()
+        self.center_v.hide()
         self.video_width = None
         self.video_height = None
         self.crop = (0, 0, 0, 0)
@@ -604,6 +624,13 @@ class VideoPreview(QGraphicsView):
     def set_locked_ratio(self, ratio):
         self.locked_ratio = ratio
 
+    def set_lock_aspect(self, enabled):
+        self.lock_aspect = enabled
+
+    def set_show_center(self, show):
+        self.show_center = show
+        self.refresh_overlay()
+
     def refresh_overlay(self):
         rect = self.content_rect()
         full = self.viewport().rect()
@@ -661,23 +688,122 @@ class VideoPreview(QGraphicsView):
         self.shade_top.setRect(0, 0, full.width(), max(0, gy_top))
         self.shade_bottom.setRect(0, gy_bottom, full.width(), max(0, full.height() - gy_bottom))
 
+        mid_x = (gx_left + gx_right) / 2
+        mid_y = (gy_top + gy_bottom) / 2
+        self.center_v.setRect(mid_x - t / 2, gy_top, t, max(0, gy_bottom - gy_top))
+        self.center_h.setRect(gx_left, mid_y - t / 2, max(0, gx_right - gx_left), t)
+        self.center_h.setVisible(self.show_center)
+        self.center_v.setVisible(self.show_center)
+
+    def _effective_ratio(self, box_w0, box_h0):
+        """The ratio a locked edit should target, or None if edits should be free right
+        now: off when the Lock Aspect Ratio checkbox is off, a preset's ratio when one is
+        selected, otherwise whatever ratio the box already has (or None if it's empty)."""
+        if not self.lock_aspect:
+            return None
+        if self.locked_ratio:
+            return self.locked_ratio
+        return box_w0 / box_h0 if box_h0 > 0 else None
+
+    def _resize_locked(self, which, new_value, left0, top0, right0, bottom0, ratio):
+        """Set edge `which` to `new_value` while preserving `ratio`: the opposite edge on
+        that axis stays fixed, and the perpendicular pair resizes around its previous
+        center. Used by guide drags, field edits, and double-click resets alike."""
+        if which in ("left", "right"):
+            fixed = right0 if which == "left" else left0
+            box_w = max(1, self.video_width - new_value - fixed)
+            box_h = box_w / ratio
+            center = (top0 + (self.video_height - bottom0)) / 2
+            max_w = self.video_width - fixed
+            max_h = 2 * min(center, self.video_height - center)
+        else:
+            fixed = bottom0 if which == "top" else top0
+            box_h = max(1, self.video_height - new_value - fixed)
+            box_w = box_h * ratio
+            center = (left0 + (self.video_width - right0)) / 2
+            max_h = self.video_height - fixed
+            max_w = 2 * min(center, self.video_width - center)
+
+        over = max(box_w / max_w if max_w > 0 else 1, box_h / max_h if max_h > 0 else 1)
+        if over > 1:
+            box_w /= over
+            box_h /= over
+
+        if which in ("left", "right"):
+            top = max(0, min(self.video_height - 1, int(round(center - box_h / 2))))
+            bottom = max(0, min(self.video_height - 1, int(round(self.video_height - center - box_h / 2))))
+            driven = max(0, min(self.video_width - 1, int(round(self.video_width - fixed - box_w))))
+            return (driven, top, fixed, bottom) if which == "left" else (fixed, top, driven, bottom)
+        else:
+            left = max(0, min(self.video_width - 1, int(round(center - box_w / 2))))
+            right = max(0, min(self.video_width - 1, int(round(self.video_width - center - box_w / 2))))
+            driven = max(0, min(self.video_height - 1, int(round(self.video_height - fixed - box_h))))
+            return (left, driven, right, fixed) if which == "top" else (left, fixed, right, driven)
+
+    def set_edge(self, which, new_value):
+        """Set one crop edge from a typed field value, honoring the aspect-ratio lock the
+        same way dragging that edge's guide would. Returns (left, top, right, bottom, locked)."""
+        dim = self.video_width if which in ("left", "right") else self.video_height
+        new_value = max(0, min(dim - 1, new_value))
+        left0, top0, right0, bottom0 = self.crop
+        box_w0 = self.video_width - left0 - right0
+        box_h0 = self.video_height - top0 - bottom0
+        ratio = self._effective_ratio(box_w0, box_h0)
+        if ratio:
+            left, top, right, bottom = self._resize_locked(which, new_value, left0, top0, right0, bottom0, ratio)
+            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
+                self.guide_active[name] = self.guide_active[name] or (val > 0)
+        else:
+            left, top, right, bottom = left0, top0, right0, bottom0
+            if which == "left":
+                left = new_value
+            elif which == "right":
+                right = new_value
+            elif which == "top":
+                top = new_value
+            else:
+                bottom = new_value
+            self.guide_active[which] = new_value > 0
+        self.crop = (left, top, right, bottom)
+        self.refresh_overlay()
+        return left, top, right, bottom, bool(ratio)
+
     def _guide_dragged(self, which, pos):
         rect = self.content_rect()
         sx = rect.width() / self.video_width
         sy = rect.height() / self.video_height
-        left, top, right, bottom = self.crop
         if which == "left":
-            left = max(0, min(self.video_width - 1, int((pos - rect.left()) / sx)))
+            new_value = max(0, min(self.video_width - 1, int((pos - rect.left()) / sx)))
         elif which == "right":
-            right = max(0, min(self.video_width - 1, int((rect.right() - pos) / sx)))
+            new_value = max(0, min(self.video_width - 1, int((rect.right() - pos) / sx)))
         elif which == "top":
-            top = max(0, min(self.video_height - 1, int((pos - rect.top()) / sy)))
-        elif which == "bottom":
-            bottom = max(0, min(self.video_height - 1, int((rect.bottom() - pos) / sy)))
+            new_value = max(0, min(self.video_height - 1, int((pos - rect.top()) / sy)))
+        else:
+            new_value = max(0, min(self.video_height - 1, int((rect.bottom() - pos) / sy)))
+
+        left0, top0, right0, bottom0 = self._crop_at_drag_start
+        box_w0 = self.video_width - left0 - right0
+        box_h0 = self.video_height - top0 - bottom0
+        ratio = self._effective_ratio(box_w0, box_h0)
+        if ratio:
+            left, top, right, bottom = self._resize_locked(which, new_value, left0, top0, right0, bottom0, ratio)
+            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
+                self.guide_active[name] = self.guide_active[name] or (val > 0)
+        else:
+            left, top, right, bottom = self.crop
+            if which == "left":
+                left = new_value
+            elif which == "right":
+                right = new_value
+            elif which == "top":
+                top = new_value
+            else:
+                bottom = new_value
+            self.guide_active[which] = new_value > 0
+
         self.crop = (left, top, right, bottom)
-        self.guide_active[which] = {"left": left, "top": top, "right": right, "bottom": bottom}[which] > 0
         self.refresh_overlay()
-        self.guides_changed.emit(left, top, right, bottom, False)
+        self.guides_changed.emit(left, top, right, bottom, bool(ratio))
 
     def _crop_move_start(self):
         self._crop_at_drag_start = self.crop
@@ -701,16 +827,16 @@ class VideoPreview(QGraphicsView):
         self.guides_changed.emit(left, top, right, bottom, True)
 
     def _corner_dragged(self, h_edge, v_edge, scene_pos):
-        # Corners always scale proportionally (opposite edges fixed) rather than resizing
-        # the two edges independently - using the preset's ratio if one is locked, or
-        # else whatever ratio the box already had when this drag started.
+        # With the lock on, corners scale proportionally (opposite edges fixed) rather
+        # than resizing the two edges independently - the preset's ratio if one is
+        # selected, else whatever ratio the box already had when this drag started.
         rect = self.content_rect()
         sx = rect.width() / self.video_width
         sy = rect.height() / self.video_height
         left0, top0, right0, bottom0 = self._crop_at_drag_start
         box_w0 = self.video_width - left0 - right0
         box_h0 = self.video_height - top0 - bottom0
-        ratio = self.locked_ratio or (box_w0 / box_h0 if box_h0 > 0 else None)
+        ratio = self._effective_ratio(box_w0, box_h0)
 
         if ratio:
             fixed_h, anchor_x = (right0, rect.right() - int(right0 * sx)) if h_edge == "left" \
@@ -757,24 +883,33 @@ class VideoPreview(QGraphicsView):
 
         self.crop = (left, top, right, bottom)
         self.refresh_overlay()
-        # Corner drags are always ratio-preserving by construction, so they never need
-        # to break an active preset lock.
-        self.guides_changed.emit(left, top, right, bottom, True)
+        self.guides_changed.emit(left, top, right, bottom, bool(ratio))
 
     def _guide_reset(self, which):
-        left, top, right, bottom = self.crop
-        if which == "left":
-            left = 0
-        elif which == "right":
-            right = 0
-        elif which == "top":
-            top = 0
-        elif which == "bottom":
-            bottom = 0
+        left0, top0, right0, bottom0 = self.crop
+        box_w0 = self.video_width - left0 - right0
+        box_h0 = self.video_height - top0 - bottom0
+        ratio = self._effective_ratio(box_w0, box_h0)
+        if ratio:
+            # Extend this edge to the frame boundary while preserving the ratio, instead
+            # of the unlocked meaning of "remove this edge" (which would break it).
+            left, top, right, bottom = self._resize_locked(which, 0, left0, top0, right0, bottom0, ratio)
+            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
+                self.guide_active[name] = self.guide_active[name] or (val > 0)
+        else:
+            left, top, right, bottom = left0, top0, right0, bottom0
+            if which == "left":
+                left = 0
+            elif which == "right":
+                right = 0
+            elif which == "top":
+                top = 0
+            else:
+                bottom = 0
+            self.guide_active[which] = False
         self.crop = (left, top, right, bottom)
-        self.guide_active[which] = False
         self.refresh_overlay()
-        self.guides_changed.emit(left, top, right, bottom, False)
+        self.guides_changed.emit(left, top, right, bottom, bool(ratio))
 
 
 class Scrubber(QWidget):
@@ -1106,6 +1241,16 @@ class MainWindow(QMainWindow):
         orient_row.addStretch()
         aspect_row.addLayout(orient_row)
 
+        self.lock_aspect_check = QCheckBox("Lock Aspect Ratio")
+        self.lock_aspect_check.setChecked(True)
+        self.lock_aspect_check.setToolTip(
+            "When on, every crop edit - dragging a guide or corner, typing a field, "
+            "double-clicking a guide - keeps the box's current ratio. When off, they all "
+            "move independently.")
+        self.lock_aspect_check.toggled.connect(self.preview.set_lock_aspect)
+        self.lock_aspect_check.setEnabled(False)
+        aspect_row.addWidget(self.lock_aspect_check)
+
         crop_grid = QGridLayout()
         self.crop_left = NumberLineEdit()
         self.crop_top = NumberLineEdit()
@@ -1128,6 +1273,9 @@ class MainWindow(QMainWindow):
         self.clear_crop_button = QPushButton("Clear Crop")
         self.clear_crop_button.clicked.connect(self.clear_crop)
         self.clear_crop_button.setEnabled(False)
+        self.show_center_check = QCheckBox("Show Center")
+        self.show_center_check.toggled.connect(self.preview.set_show_center)
+        self.show_center_check.setEnabled(False)
 
         crop_tab_page = QWidget()
         crop_tab_layout = QVBoxLayout(crop_tab_page)
@@ -1135,6 +1283,7 @@ class MainWindow(QMainWindow):
         crop_tab_layout.setSpacing(8)
         crop_tab_layout.addLayout(aspect_row)
         crop_tab_layout.addLayout(crop_grid)
+        crop_tab_layout.addWidget(self.show_center_check)
         crop_tab_layout.addWidget(self.crop_dims_label)
         crop_tab_layout.addWidget(crop_note)
         crop_tab_layout.addWidget(self.clear_crop_button)
@@ -1181,8 +1330,8 @@ class MainWindow(QMainWindow):
             widget.textChanged.connect(self.on_keyframe_fields_changed)
         for widget in self.frame_edits:
             widget.textChanged.connect(self.on_frame_fields_changed)
-        for widget in self.crop_edits:
-            widget.textChanged.connect(self.on_crop_fields_changed)
+        for which, widget in zip(("left", "top", "right", "bottom"), self.crop_edits):
+            widget.textChanged.connect(lambda _text, w=which: self.on_crop_field_edited(w))
         self.aspect_combo.activated.connect(self.on_aspect_ratio_selected)
         self.orient_horizontal.toggled.connect(self.on_aspect_ratio_selected)
         self.remove_audio.toggled.connect(self.update_suffix_placeholder)
@@ -1293,6 +1442,8 @@ class MainWindow(QMainWindow):
         self.orient_horizontal.setEnabled(True)
         self.orient_vertical.setEnabled(True)
         self.clear_crop_button.setEnabled(True)
+        self.show_center_check.setEnabled(True)
+        self.lock_aspect_check.setEnabled(True)
         self.process_button.setEnabled(True)
         self.play_button.setEnabled(True)
         self.step_back_button.setEnabled(True)
@@ -1335,6 +1486,8 @@ class MainWindow(QMainWindow):
         self.orient_horizontal.setEnabled(False)
         self.orient_vertical.setEnabled(False)
         self.clear_crop_button.setEnabled(False)
+        self.show_center_check.setEnabled(False)
+        self.lock_aspect_check.setEnabled(False)
         self.process_button.setEnabled(False)
         self.play_button.setEnabled(False)
         self.step_back_button.setEnabled(False)
@@ -1356,26 +1509,38 @@ class MainWindow(QMainWindow):
     # --- video preview <-> crop field sync ---
 
     def clear_crop(self):
+        if not self.path:
+            return
+        self._syncing = True
         for field in self.crop_edits:
             field.clear()
+        self._syncing = False
+        self.preview.set_crop_pixels(0, 0, 0, 0)
+        self.update_suffix_placeholder()
+        self.update_crop_dims_label()
 
-    def on_crop_fields_changed(self):
+    def on_crop_field_edited(self, which):
         self.update_suffix_placeholder()
         self.update_crop_dims_label()
         if self._syncing or not self.path:
             return
         self._syncing = True
         try:
-            left = int(self.crop_left.text() or 0)
-            top = int(self.crop_top.text() or 0)
-            right = int(self.crop_right.text() or 0)
-            bottom = int(self.crop_bottom.text() or 0)
-            self.preview.set_crop_pixels(left, top, right, bottom)
-            self.break_aspect_lock()
+            edit = {"left": self.crop_left, "top": self.crop_top,
+                    "right": self.crop_right, "bottom": self.crop_bottom}[which]
+            new_value = int(edit.text() or 0)
+            if new_value < 0:
+                raise ValueError("crop value must be >= 0")
+            left, top, right, bottom, locked = self.preview.set_edge(which, new_value)
+            for target_edit, value in zip(self.crop_edits, (left, top, right, bottom)):
+                target_edit.setText(str(value))
+            if not locked:
+                self.break_aspect_lock()
         except ValueError:
             pass
         finally:
             self._syncing = False
+        self.update_crop_dims_label()
 
     def current_target_ratio(self):
         """The width/height ratio the aspect-ratio dropdown currently asks for, or None
@@ -1403,9 +1568,8 @@ class MainWindow(QMainWindow):
                 crop_h = vh - round(vw / ratio)
             left, right = crop_w // 2, crop_w - crop_w // 2
             top, bottom = crop_h // 2, crop_h - crop_h // 2
-        # Suppress on_crop_fields_changed while writing all four fields - otherwise each
-        # individual setText fires it against a still-partially-updated set of fields,
-        # which would trip the ratio-mismatch check below and immediately undo this pick.
+        # Suppress on_crop_field_edited while writing all four fields - each individual
+        # setText would otherwise fire it against a still-partially-updated set of fields.
         self._syncing = True
         for edit, value in zip(self.crop_edits, (left, top, right, bottom)):
             edit.setText(str(value))
@@ -1416,9 +1580,9 @@ class MainWindow(QMainWindow):
         self.update_crop_dims_label()
 
     def break_aspect_lock(self):
-        """Drop the aspect-ratio dropdown back to Free. Called for any edit that isn't
-        guaranteed to preserve the selected ratio - a single-guide drag/reset or typing
-        directly into a crop field - even by a single pixel."""
+        """Drop the aspect-ratio dropdown back to Free. Called whenever an edit went
+        through unlocked (Lock Aspect Ratio was off, or the box was empty), so a preset
+        that no longer matches the actual box stops being displayed as selected."""
         if self.aspect_combo.currentIndex() != 0:
             self.aspect_combo.setCurrentIndex(0)
             self.preview.set_locked_ratio(None)
