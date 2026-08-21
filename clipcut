@@ -1215,7 +1215,7 @@ class MainWindow(QMainWindow):
 
         self.scrubber = Scrubber()
         self.scrubber.seek_requested.connect(self.on_seek_requested)
-        self.scrubber.segment_clicked.connect(self.on_cut_list_selected)
+        self.scrubber.segment_clicked.connect(self.on_segment_clicked)
         self.scrubber.segment_edited.connect(self.on_segment_edited)
         below_preview.addWidget(self.scrubber)
 
@@ -2209,6 +2209,15 @@ class MainWindow(QMainWindow):
             start, end = self.trim_seconds_for_cut(cut)
             segments.append((start, end, i == self.active_cut))
         self.scrubber.set_cuts(segments)
+
+    def on_segment_clicked(self, index):
+        """Handler for Scrubber.segment_clicked, which emits a raw index into
+        self.cuts (creation order, via enumerate() in refresh_timeline_cuts) -
+        unlike on_cut_list_selected's row argument, this needs no translation
+        through cut_list's start-time-sorted rows."""
+        self.sync_active_cut_from_widgets()
+        self.select_cut(index)
+        self.refresh_cut_list()
 
     def on_segment_edited(self, index, start, end):
         if index != self.active_cut:
