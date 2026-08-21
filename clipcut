@@ -831,7 +831,10 @@ class MainWindow(QMainWindow):
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
-        self.progress_bar.setVisible(False)
+        # Fixed height matching a line of text, and always present in the layout
+        # (never hidden) - toggling visibility used to remove it from the layout
+        # entirely, reflowing everything above it every time it appeared/disappeared.
+        self.progress_bar.setFixedHeight(QFontMetrics(self.progress_bar.font()).height() + 4)
         sidebar.addWidget(self.progress_bar)
 
         status_row = QHBoxLayout()
@@ -1294,7 +1297,6 @@ class MainWindow(QMainWindow):
         self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
         self.status.setText("")
 
         self.process = QProcess(self)
@@ -1322,13 +1324,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def on_process_error(self, _error):
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
         self.process_button.setEnabled(True)
         self.report_error("Failed to launch ffmpeg", self.process.errorString())
         self.process = None
 
     def on_process_finished(self, exit_code, _exit_status):
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
         self.process_button.setEnabled(True)
         stderr = bytes(self.process.readAllStandardError()).decode(errors="replace")
         self.process = None
