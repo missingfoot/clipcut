@@ -1299,7 +1299,7 @@ class MainWindow(QMainWindow):
         out_path = self.pending_out_path
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
-        self.status.setText(f"Saved: {out_path.name}")
+        self.status.setText("Saved successfully")
 
 
 def main():
