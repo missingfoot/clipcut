@@ -131,7 +131,8 @@ def make_frame_row(label_text):
     label.setFixedWidth(40)
     row.addWidget(label)
     frame_edit = NumberLineEdit()
-    frame_edit.setPlaceholderText("0")
+    # No placeholder text: blank means "not set" (start of file / end of file), and a
+    # "0" placeholder here would look identical to a real, deliberately-typed 0.
     frame_edit.setMaximumWidth(60)
     row.addWidget(frame_edit)
     ref_label = QLabel("(0:00)")
@@ -960,6 +961,8 @@ class Scrubber(QWidget):
         self.position = 0.0
         self.trim_start = 0.0
         self.trim_end = 0.0
+        self.has_trim = False  # nothing actually cut yet - don't paint the full-width
+        # selection that a start=0/end=duration default would otherwise suggest.
         self.keyframe_times = []
         self._dragging = None
 
@@ -971,15 +974,17 @@ class Scrubber(QWidget):
         self.duration = duration
         self.trim_start = 0.0
         self.trim_end = duration
+        self.has_trim = False
         self.update()
 
     def set_position(self, seconds):
         self.position = seconds
         self.update()
 
-    def set_trim(self, start, end):
+    def set_trim(self, start, end, has_trim=True):
         self.trim_start = start
         self.trim_end = end
+        self.has_trim = has_trim
         self.update()
 
     def x_for_time(self, t):
@@ -998,17 +1003,19 @@ class Scrubber(QWidget):
         if self.duration > 0:
             x1 = self.x_for_time(self.trim_start)
             x2 = self.x_for_time(self.trim_end)
-            painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), QColor("#3a5f8a"))
+            if self.has_trim:
+                painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), QColor("#3a5f8a"))
             for kf in self.keyframe_times:
                 kx = self.x_for_time(kf)
                 painter.fillRect(kx, 0, 1, self.height(), QColor(255, 255, 255, 45))
             px = self.x_for_time(self.position)
             painter.fillRect(px, 0, 1, self.height(), QColor("#ffffff"))
-            box_color = QColor("#7fc7ff")
-            painter.fillRect(x1, 0, 1, self.height(), box_color)
-            painter.fillRect(x2, 0, 1, self.height(), box_color)
-            painter.fillRect(x1, 0, max(1, x2 - x1), 1, box_color)
-            painter.fillRect(x1, self.height() - 1, max(1, x2 - x1), 1, box_color)
+            if self.has_trim:
+                box_color = QColor("#7fc7ff")
+                painter.fillRect(x1, 0, 1, self.height(), box_color)
+                painter.fillRect(x2, 0, 1, self.height(), box_color)
+                painter.fillRect(x1, 0, max(1, x2 - x1), 1, box_color)
+                painter.fillRect(x1, self.height() - 1, max(1, x2 - x1), 1, box_color)
         painter.end()
 
     def _handle_at(self, x):
@@ -1036,9 +1043,11 @@ class Scrubber(QWidget):
         t = self.time_for_x(x)
         if self._dragging == "start":
             self.trim_start = max(0.0, min(t, self.trim_end - 0.1))
+            self.has_trim = True
             self.trim_changed.emit(self.trim_start, self.trim_end)
         elif self._dragging == "end":
             self.trim_end = min(self.duration, max(t, self.trim_start + 0.1))
+            self.has_trim = True
             self.trim_changed.emit(self.trim_start, self.trim_end)
         elif self._dragging == "playhead":
             self.position = t
@@ -1511,9 +1520,7 @@ class MainWindow(QMainWindow):
         self.set_filename_label(path.name)
         self.browse_button.setText("Replace File...")
         self.start_keyframe_edit.clear()
-        # Blank End means "use the range" everywhere else, so default it explicitly
-        # to the last keyframe rather than leaving it implying index 0.
-        self.end_keyframe_edit.setText(str(max(0, len(self.keyframe_times) - 1)))
+        self.end_keyframe_edit.clear()
         for field in self.frame_edits:
             field.clear()
         for field in self.crop_edits:
@@ -1707,8 +1714,8 @@ class MainWindow(QMainWindow):
 
     def on_keyframe_fields_changed(self):
         self.start_keyframe_ref.setText(f"({format_time(self.keyframe_time(int(self.start_keyframe_edit.text() or 0)))})")
-        end_idx = int(self.end_keyframe_edit.text()) if self.end_keyframe_edit.text() else max(0, len(self.keyframe_times) - 1)
-        self.end_keyframe_ref.setText(f"({format_time(self.keyframe_time(end_idx))})")
+        end_time = self.keyframe_time(int(self.end_keyframe_edit.text())) if self.end_keyframe_edit.text() else (self.duration or 0)
+        self.end_keyframe_ref.setText(f"({format_time(end_time)})")
         self.update_suffix_placeholder()
         if self._syncing or not self.path:
             return
@@ -1717,13 +1724,15 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._syncing = True
-        self.scrubber.set_trim(start, end)
+        has_trim = bool(self.start_keyframe_edit.text() or self.end_keyframe_edit.text())
+        self.scrubber.set_trim(start, end, has_trim)
         self._syncing = False
 
     def on_frame_fields_changed(self):
         fps = self.video_fps or 30.0
         self.start_frame_ref.setText(f"({format_time(int(self.start_frame_edit.text() or 0) / fps)})")
-        self.end_frame_ref.setText(f"({format_time(int(self.end_frame_edit.text() or 0) / fps)})")
+        end_time = int(self.end_frame_edit.text()) / fps if self.end_frame_edit.text() else (self.duration or 0)
+        self.end_frame_ref.setText(f"({format_time(end_time)})")
         self.update_suffix_placeholder()
         if self._syncing or not self.path:
             return
@@ -1732,8 +1741,31 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._syncing = True
-        self.scrubber.set_trim(start, end)
+        has_trim = bool(self.start_frame_edit.text() or self.end_frame_edit.text())
+        self.scrubber.set_trim(start, end, has_trim)
         self._syncing = False
+
+    def write_start_field(self, seconds):
+        """Write a Start value, but leave the field blank instead of a literal "0" when
+        it's at the very beginning - blank already means that, and a real "0" reads as
+        if something deliberate were set."""
+        if self.frame_mode:
+            fps = self.video_fps or 30.0
+            frame = round(seconds * fps)
+            self.start_frame_edit.setText("" if frame <= 0 else str(frame))
+        else:
+            idx = self.keyframe_index_of(seconds)
+            self.start_keyframe_edit.setText("" if idx <= 0 else str(idx))
+
+    def write_end_field(self, seconds):
+        """Write an End value, but leave the field blank instead of a concrete number
+        when it's at (or past) the file's actual end - see write_start_field."""
+        at_end = seconds >= self.duration - 0.01
+        if self.frame_mode:
+            fps = self.video_fps or 30.0
+            self.end_frame_edit.setText("" if at_end else str(round(seconds * fps)))
+        else:
+            self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
 
     def on_cut_mode_changed(self, index):
         checked = bool(index)  # tab 0 = Keyframe, tab 1 = Frame
@@ -1746,17 +1778,13 @@ class MainWindow(QMainWindow):
                 start, end = self.read_keyframe_fields_seconds() if checked else self.read_frame_fields_seconds()
             except ValueError:
                 start, end = 0.0, self.duration
+            # self.frame_mode already reflects the tab just switched to, so these target
+            # the right fields; blank stays blank rather than becoming a literal "0" or
+            # a concrete End number that (for Keyframe mode) could cap it to a keyframe
+            # well before the file's actual end.
             self._syncing = True
-            if checked:
-                fps = self.video_fps or 30.0
-                self.start_frame_edit.setText(str(round(start * fps)))
-                self.end_frame_edit.setText(str(round(end * fps)))
-            else:
-                # Coming back from frame mode, re-snap to keyframes and show the
-                # keyframe index - otherwise leaving frame mode would silently carry
-                # over a value no keyframe field can actually represent.
-                self.start_keyframe_edit.setText(str(self.keyframe_index_of(start)))
-                self.end_keyframe_edit.setText(str(self.keyframe_index_of(end)))
+            self.write_start_field(start)
+            self.write_end_field(end)
             self._syncing = False
         self.update_suffix_placeholder()
 
@@ -1764,13 +1792,8 @@ class MainWindow(QMainWindow):
         if self._syncing:
             return
         self._syncing = True
-        if self.frame_mode:
-            fps = self.video_fps or 30.0
-            self.start_frame_edit.setText(str(round(start * fps)))
-            self.end_frame_edit.setText(str(round(end * fps)))
-        else:
-            self.start_keyframe_edit.setText(str(self.keyframe_index_of(start)))
-            self.end_keyframe_edit.setText(str(self.keyframe_index_of(end)))
+        self.write_start_field(start)
+        self.write_end_field(end)
         self._syncing = False
         self.update_suffix_placeholder()
 
@@ -1799,16 +1822,23 @@ class MainWindow(QMainWindow):
     def frame_duration(self):
         return 1.0 / self.video_fps if self.video_fps else 1.0
 
+    # QMediaPlayer.setPosition() only takes whole milliseconds, so a seek to a keyframe
+    # lands up to ~1ms short of its true (sub-ms-precision) timestamp; current_position()
+    # then reads back that slightly-earlier value. Without this tolerance, the next
+    # prev/next press treats "slightly before keyframe X" as still short of X and finds
+    # the same one again - permanently stuck, especially with closely-spaced keyframes.
+    KEYFRAME_SEEK_EPS = 0.002
+
     def prev_keyframe_time(self, t):
         if not self.keyframe_times:
             return 0.0
-        idx = bisect.bisect_left(self.keyframe_times, t) - 1
+        idx = bisect.bisect_left(self.keyframe_times, t - self.KEYFRAME_SEEK_EPS) - 1
         return self.keyframe_times[max(0, idx)]
 
     def next_keyframe_time(self, t):
         if not self.keyframe_times:
             return t
-        idx = bisect.bisect_right(self.keyframe_times, t)
+        idx = bisect.bisect_right(self.keyframe_times, t + self.KEYFRAME_SEEK_EPS)
         return self.keyframe_times[min(len(self.keyframe_times) - 1, idx)]
 
     def current_position(self):
@@ -1847,20 +1877,10 @@ class MainWindow(QMainWindow):
         self.actual_size_button.setText("Fit" if actual else "100%")
 
     def set_start_from_playhead(self):
-        pos = self.current_position()
-        if self.frame_mode:
-            fps = self.video_fps or 30.0
-            self.start_frame_edit.setText(str(round(pos * fps)))
-        else:
-            self.start_keyframe_edit.setText(str(self.keyframe_index_of(pos)))
+        self.write_start_field(self.current_position())
 
     def set_end_from_playhead(self):
-        pos = self.current_position()
-        if self.frame_mode:
-            fps = self.video_fps or 30.0
-            self.end_frame_edit.setText(str(round(pos * fps)))
-        else:
-            self.end_keyframe_edit.setText(str(self.keyframe_index_of(pos)))
+        self.write_end_field(self.current_position())
 
     def on_playback_state_changed(self, state):
         self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
@@ -1886,11 +1906,18 @@ class MainWindow(QMainWindow):
     def read_frame_fields_seconds(self):
         fps = self.video_fps or 30.0
         start_frame = int(self.start_frame_edit.text() or 0)
-        end_frame = int(self.end_frame_edit.text() or 0)
-        if start_frame < 0 or end_frame < 0:
+        if start_frame < 0:
             raise ValueError("frame numbers must be >= 0")
         start = start_frame / fps
-        end = end_frame / fps
+        # Blank End means "through the end of the file", matching blank Start meaning
+        # "from the beginning" - not frame 0, which would make every blank-End cut empty.
+        if self.end_frame_edit.text():
+            end_frame = int(self.end_frame_edit.text())
+            if end_frame < 0:
+                raise ValueError("frame numbers must be >= 0")
+            end = end_frame / fps
+        else:
+            end = self.duration
         if not (0 <= start < end <= self.duration + 0.01):
             raise ValueError("frame range leaves nothing to cut")
         return start, end
@@ -1898,13 +1925,21 @@ class MainWindow(QMainWindow):
     def read_keyframe_fields_seconds(self):
         if not self.keyframe_times:
             raise ValueError("no keyframe data")
-        last_idx = len(self.keyframe_times) - 1
         start_idx = int(self.start_keyframe_edit.text()) if self.start_keyframe_edit.text() else 0
-        end_idx = int(self.end_keyframe_edit.text()) if self.end_keyframe_edit.text() else last_idx
-        if start_idx < 0 or end_idx < 0:
+        if start_idx < 0:
             raise ValueError("keyframe numbers must be >= 0")
         start = self.keyframe_time(start_idx)
-        end = self.keyframe_time(end_idx)
+        # Blank End means "through the end of the file". Unlike Start, the end of a
+        # stream-copy cut doesn't need to land on a keyframe, so it isn't capped to the
+        # last keyframe's time - which can sit well before the file's actual end (e.g. a
+        # clip with only one keyframe would otherwise default End to time 0).
+        if self.end_keyframe_edit.text():
+            end_idx = int(self.end_keyframe_edit.text())
+            if end_idx < 0:
+                raise ValueError("keyframe numbers must be >= 0")
+            end = self.keyframe_time(end_idx)
+        else:
+            end = self.duration
         if not (0 <= start < end <= self.duration + 0.01):
             raise ValueError("keyframe range leaves nothing to cut")
         return start, end
