@@ -4,8 +4,10 @@
 import bisect
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -2554,6 +2556,7 @@ class MainWindow(QMainWindow):
         if self.export_mode_combined.isChecked() and len(self.cuts) > 1:
             self.do_process_combined()
             return
+        self.export_is_combined = False
         try:
             self.sync_active_cut_from_widgets()
             saved_active = self.active_cut
@@ -2581,8 +2584,74 @@ class MainWindow(QMainWindow):
         self.process_button.setEnabled(False)
         self.run_next_export()
 
+    def do_process_combined(self):
+        try:
+            self.sync_active_cut_from_widgets()
+            saved_active = self.active_cut
+            tmp_dir = Path(tempfile.mkdtemp(prefix="clipcut_"))
+            queue = []
+            crops = []
+            for i, cut in enumerate(self.cuts):
+                self.select_cut(i)
+                ext = ".m4a" if self.audio_only.isChecked() else self.path.suffix
+                tmp_path = tmp_dir / f"part_{i + 1}{ext}"
+                cmd, target_duration = self.build_ffmpeg_args(tmp_path)
+                queue.append((cmd, tmp_path, target_duration))
+                try:
+                    crops.append(self.get_crop()[:2] + self.get_crop()[2:4])
+                except ValueError:
+                    crops.append(None)
+            self.select_cut(saved_active)
+        except ValueError as e:
+            self.status.setText(f"Invalid input: {e}")
+            self.error_details_button.setVisible(False)
+            return
+
+        self.combined_tmp_dir = tmp_dir
+        self.combined_uniform = len(set(crops)) <= 1 and (
+            len(self.cuts) == 1 or all(c.frame_mode == self.cuts[0].frame_mode for c in self.cuts))
+        self.export_queue = queue
+        self.export_is_combined = True
+        self.error_details_button.setVisible(False)
+        self.process_button.setEnabled(False)
+        self.run_next_export()
+
+    def run_concat(self):
+        parts = sorted(self.combined_tmp_dir.glob("part_*"))
+        append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
+        ext = ".m4a" if self.audio_only.isChecked() else self.path.suffix
+        out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{ext}"))
+
+        if self.combined_uniform:
+            list_path = self.combined_tmp_dir / "list.txt"
+            list_path.write_text("".join(f"file '{p}'\n" for p in parts))
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(out_path)]
+        else:
+            inputs = []
+            for p in parts:
+                inputs += ["-i", str(p)]
+            n = len(parts)
+            filter_str = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n)) + f"concat=n={n}:v=1:a=1[v][a]"
+            cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[v]", "-map", "[a]", str(out_path)]
+
+        self.pending_out_path = out_path
+        self.export_is_combined = False  # concat's own finish should behave like a normal single completion
+        self.progress_target_duration = 0
+        self.process = QProcess(self)
+        self.process.readyReadStandardOutput.connect(self.on_process_output)
+        self.process.finished.connect(self.on_concat_finished)
+        self.process.errorOccurred.connect(self.on_process_error)
+        self.process.start(cmd[0], cmd[1:])
+
+    def on_concat_finished(self, exit_code, exit_status):
+        shutil.rmtree(self.combined_tmp_dir, ignore_errors=True)
+        self.on_process_finished(exit_code, exit_status)
+
     def run_next_export(self):
         if not self.export_queue:
+            if getattr(self, "export_is_combined", False):
+                self.run_concat()
+                return
             self.spinner_timer.stop()
             self.process_button.setEnabled(True)
             self.status.setText("Saved successfully")
