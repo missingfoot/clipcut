@@ -2486,20 +2486,19 @@ class MainWindow(QMainWindow):
     def update_suffix_placeholder(self):
         self.suffix_edit.setPlaceholderText(self.compute_default_suffix())
 
-    def build_command(self):
-        """Return (cmd, out_path, target_duration). Raises ValueError on bad input."""
+    def build_ffmpeg_args(self, out_path):
+        """Return (cmd, target_duration) for the currently-active cut's trim/crop/
+        audio settings, writing to the given out_path. Raises ValueError on bad
+        input. Path-agnostic core of build_command, reused by multi-cut export."""
         start, end = self.get_trim_times()
         target_duration = end - start
-        append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
 
         if self.audio_only.isChecked():
-            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}.m4a"))
             cmd += ["-vn", "-c:a", "copy", str(out_path)]
-            return cmd, out_path, target_duration
+            return cmd, target_duration
 
         left, top, crop_w, crop_h, has_crop = self.get_crop()
-        out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
         if has_crop:
             cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
                     "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
@@ -2509,6 +2508,17 @@ class MainWindow(QMainWindow):
             cmd += ["-c:v", "copy"]
         cmd += ["-an"] if self.remove_audio.isChecked() else ["-c:a", "copy"]
         cmd.append(str(out_path))
+        return cmd, target_duration
+
+    def build_command(self):
+        """Return (cmd, out_path, target_duration) using the default single-export
+        output path. Raises ValueError on bad input."""
+        append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
+        if self.audio_only.isChecked():
+            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}.m4a"))
+        else:
+            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
+        cmd, target_duration = self.build_ffmpeg_args(out_path)
         return cmd, out_path, target_duration
 
     def advance_spinner(self):
