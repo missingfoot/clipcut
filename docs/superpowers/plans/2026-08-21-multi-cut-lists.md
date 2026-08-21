@@ -491,21 +491,16 @@ Add a method that builds the segment list from `self.cuts` and pushes it to the 
             start, end = self.trim_seconds_for_cut(cut)
             segments.append((start, end, i == self.active_cut))
         self.scrubber.set_cuts(segments)
-
-    def trim_seconds_for_cut(self, cut):
-        """Resolve a Cut's start/end to seconds without touching live widgets -
-        the read-only counterpart to select_cut, used for timeline/export."""
-        if cut.frame_mode:
-            fps = self.video_fps or 30.0
-            start = cut.start_repr / fps
-            end = cut.end_repr / fps if cut.end_repr is not None else self.duration
-        else:
-            start = self.keyframe_time(cut.start_repr)
-            end = self.keyframe_time(cut.end_repr) if cut.end_repr is not None else self.duration
-        return start, end
 ```
 
+`trim_seconds_for_cut` is already defined in Task 1 - this task only consumes it, it does not redefine it. If `grep -n "def trim_seconds_for_cut" clipcut` shows more than one definition, something has gone wrong; there must be exactly one.
+
 Call `self.refresh_timeline_cuts()` at the end of `refresh_cut_list` (Task 2) and at the end of `select_cut` (Task 1).
+
+The active cut's segment must also update live while its Start/End fields are being typed or its Frame/Keyframe mode is toggled - not just when navigating to a different cut. Add a call to `self.refresh_timeline_cuts()` at the end of these three existing methods (the same three Task 2 added `sync_active_cut_from_widgets()` calls to):
+- `write_start_field` (after its existing body)
+- `write_end_field` (after its existing body)
+- `on_cut_mode_changed` (after its existing body, including the `sync_active_cut_from_widgets()` call Task 2 added)
 
 Connect the new scrubber signals in `MainWindow.__init__` next to the existing `self.scrubber.trim_changed.connect(...)`:
 
@@ -551,6 +546,13 @@ win.cuts.append(m.Cut(start_repr=60, end_repr=90, frame_mode=True))
 win.refresh_timeline_cuts()
 assert len(win.scrubber.segments) == 2
 assert win.scrubber.segments[0][2] is True  # cut 0 still active
+
+# Editing the active cut's Start field must move its segment live, without
+# navigating away first.
+win.write_start_field(1.0)
+fps = win.video_fps or 30.0
+active_segment = next(s for s in win.scrubber.segments if s[2])
+assert abs(active_segment[0] - round(1.0 * fps) / fps) < 0.01, active_segment
 print("OK")
 EOF
 [ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
