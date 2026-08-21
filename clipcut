@@ -2610,6 +2610,7 @@ class MainWindow(QMainWindow):
         self.combined_tmp_dir = tmp_dir
         self.combined_uniform = len(set(crops)) <= 1 and (
             len(self.cuts) == 1 or all(c.frame_mode == self.cuts[0].frame_mode for c in self.cuts))
+        self.combined_target_size = (max(c[2] for c in crops), max(c[3] for c in crops))
         self.export_queue = queue
         self.export_is_combined = True
         self.error_details_button.setVisible(False)
@@ -2631,7 +2632,14 @@ class MainWindow(QMainWindow):
             for p in parts:
                 inputs += ["-i", str(p)]
             n = len(parts)
-            filter_str = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n)) + f"concat=n={n}:v=1:a=1[v][a]"
+            tw, th = self.combined_target_size
+            scale_parts = [
+                f"[{i}:v:0]scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]"
+                for i in range(n)
+            ]
+            concat_inputs = "".join(f"[v{i}][{i}:a:0]" for i in range(n))
+            filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
             cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[v]", "-map", "[a]", str(out_path)]
 
         self.pending_out_path = out_path
