@@ -1035,7 +1035,8 @@ class Scrubber(QWidget):
     """Seek bar with a playhead plus draggable start/end trim handles."""
 
     seek_requested = Signal(float)
-    trim_changed = Signal(float, float)  # absolute start seconds, absolute end seconds
+    segment_clicked = Signal(int)
+    segment_edited = Signal(int, float, float)
 
     HANDLE_GRAB = 6
 
@@ -1044,10 +1045,8 @@ class Scrubber(QWidget):
         self.setMinimumHeight(28)
         self.duration = 0.0
         self.position = 0.0
-        self.trim_start = 0.0
-        self.trim_end = 0.0
-        self.has_trim = False  # nothing actually cut yet - don't paint the full-width
-        # selection that a start=0/end=duration default would otherwise suggest.
+        self.segments = []  # list of (start, end, is_active)
+        self._drag_segment = None  # index into self.segments currently being dragged
         self.keyframe_times = []
         self._dragging = None
 
@@ -1057,19 +1056,14 @@ class Scrubber(QWidget):
 
     def set_duration(self, duration):
         self.duration = duration
-        self.trim_start = 0.0
-        self.trim_end = duration
-        self.has_trim = False
         self.update()
 
     def set_position(self, seconds):
         self.position = seconds
         self.update()
 
-    def set_trim(self, start, end, has_trim=True):
-        self.trim_start = start
-        self.trim_end = end
-        self.has_trim = has_trim
+    def set_cuts(self, segments):
+        self.segments = segments
         self.update()
 
     def x_for_time(self, t):
@@ -1088,21 +1082,20 @@ class Scrubber(QWidget):
         # surface rather than an arbitrarily-picked dark gray.
         painter.fillRect(self.rect(), self.palette().color(QPalette.Base))
         if self.duration > 0:
-            x1 = self.x_for_time(self.trim_start)
-            x2 = self.x_for_time(self.trim_end)
-            if self.has_trim:
-                painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), QColor("#3a5f8a"))
             for kf in self.keyframe_times:
                 kx = self.x_for_time(kf)
                 painter.fillRect(kx, 0, 1, self.height(), QColor(255, 255, 255, 45))
-            px = self.x_for_time(self.position)
-            painter.fillRect(px, 0, 1, self.height(), QColor("#ffffff"))
-            if self.has_trim:
-                box_color = QColor("#7fc7ff")
+            for start, end, is_active in self.segments:
+                x1, x2 = self.x_for_time(start), self.x_for_time(end)
+                fill = QColor("#3a5f8a") if is_active else QColor("#2f4a63")
+                painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), fill)
+                box_color = QColor("#7fc7ff") if is_active else QColor(255, 255, 255, 90)
                 painter.fillRect(x1, 0, 1, self.height(), box_color)
                 painter.fillRect(x2, 0, 1, self.height(), box_color)
                 painter.fillRect(x1, 0, max(1, x2 - x1), 1, box_color)
                 painter.fillRect(x1, self.height() - 1, max(1, x2 - x1), 1, box_color)
+            px = self.x_for_time(self.position)
+            painter.fillRect(px, 0, 1, self.height(), QColor("#ffffff"))
         # A single stroked rect, not four overlapping fillRects - overlapping semi-
         # transparent fills would double up at the corners and look brighter there.
         painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
@@ -1112,16 +1105,26 @@ class Scrubber(QWidget):
 
     def _handle_at(self, x):
         if self.duration <= 0:
-            return None
-        if abs(x - self.x_for_time(self.trim_start)) <= self.HANDLE_GRAB:
-            return "start"
-        if abs(x - self.x_for_time(self.trim_end)) <= self.HANDLE_GRAB:
-            return "end"
-        return "playhead"
+            return None, None
+        for i, (start, end, _active) in enumerate(self.segments):
+            if abs(x - self.x_for_time(start)) <= self.HANDLE_GRAB:
+                return i, "start"
+            if abs(x - self.x_for_time(end)) <= self.HANDLE_GRAB:
+                return i, "end"
+        for i, (start, end, _active) in enumerate(self.segments):
+            if self.x_for_time(start) <= x <= self.x_for_time(end):
+                return i, "body"
+        return None, "playhead"
 
     def mousePressEvent(self, event):
         x = event.position().toPoint().x()
-        self._dragging = self._handle_at(x)
+        index, kind = self._handle_at(x)
+        if kind == "body":
+            self.segment_clicked.emit(index)
+            self._dragging = None
+            return
+        self._dragging = kind
+        self._drag_segment = index
         self._drag_to(x)
 
     def mouseMoveEvent(self, event):
@@ -1133,14 +1136,16 @@ class Scrubber(QWidget):
 
     def _drag_to(self, x):
         t = self.time_for_x(x)
-        if self._dragging == "start":
-            self.trim_start = max(0.0, min(t, self.trim_end - 0.1))
-            self.has_trim = True
-            self.trim_changed.emit(self.trim_start, self.trim_end)
-        elif self._dragging == "end":
-            self.trim_end = min(self.duration, max(t, self.trim_start + 0.1))
-            self.has_trim = True
-            self.trim_changed.emit(self.trim_start, self.trim_end)
+        if self._dragging == "start" and self._drag_segment is not None:
+            start, end, active = self.segments[self._drag_segment]
+            new_start = max(0.0, min(t, end - 0.1))
+            self.segments[self._drag_segment] = (new_start, end, active)
+            self.segment_edited.emit(self._drag_segment, new_start, end)
+        elif self._dragging == "end" and self._drag_segment is not None:
+            start, end, active = self.segments[self._drag_segment]
+            new_end = min(self.duration, max(t, start + 0.1))
+            self.segments[self._drag_segment] = (start, new_end, active)
+            self.segment_edited.emit(self._drag_segment, start, new_end)
         elif self._dragging == "playhead":
             self.position = t
             self.seek_requested.emit(t)
@@ -1210,7 +1215,8 @@ class MainWindow(QMainWindow):
 
         self.scrubber = Scrubber()
         self.scrubber.seek_requested.connect(self.on_seek_requested)
-        self.scrubber.trim_changed.connect(self.on_trim_changed)
+        self.scrubber.segment_clicked.connect(self.on_cut_list_selected)
+        self.scrubber.segment_edited.connect(self.on_segment_edited)
         below_preview.addWidget(self.scrubber)
 
         controls_row = QHBoxLayout()
@@ -1771,6 +1777,7 @@ class MainWindow(QMainWindow):
 
         self.preview.unload()
         self.scrubber.set_duration(0)
+        self.refresh_timeline_cuts()
         self.scrubber.set_keyframes([])
         self.time_label.setText("0:00 / 0:00")
 
@@ -2018,8 +2025,8 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._syncing = True
-        has_trim = bool(self.start_keyframe_edit.text() or self.end_keyframe_edit.text())
-        self.scrubber.set_trim(start, end, has_trim)
+        self.sync_active_cut_from_widgets()
+        self.refresh_timeline_cuts()
         self._syncing = False
 
     def on_frame_fields_changed(self):
@@ -2035,8 +2042,8 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         self._syncing = True
-        has_trim = bool(self.start_frame_edit.text() or self.end_frame_edit.text())
-        self.scrubber.set_trim(start, end, has_trim)
+        self.sync_active_cut_from_widgets()
+        self.refresh_timeline_cuts()
         self._syncing = False
 
     def write_start_field(self, seconds):
@@ -2051,6 +2058,7 @@ class MainWindow(QMainWindow):
             idx = self.keyframe_index_of(seconds)
             self.start_keyframe_edit.setText("" if idx <= 0 else str(idx))
         self.sync_active_cut_from_widgets()
+        self.refresh_timeline_cuts()
 
     def write_end_field(self, seconds):
         """Write an End value, but leave the field blank instead of a concrete number
@@ -2062,6 +2070,7 @@ class MainWindow(QMainWindow):
         else:
             self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
         self.sync_active_cut_from_widgets()
+        self.refresh_timeline_cuts()
 
     def on_cut_mode_changed(self, is_frame):
         if self._syncing:
@@ -2090,6 +2099,7 @@ class MainWindow(QMainWindow):
             self._syncing = False
         self.update_suffix_placeholder()
         self.sync_active_cut_from_widgets()
+        self.refresh_timeline_cuts()
 
     def cut_start_seconds(self, cut):
         """Best-effort start time in seconds for sorting/display - reuses
@@ -2109,6 +2119,7 @@ class MainWindow(QMainWindow):
                 self.cut_list.setCurrentRow(row)
         self.cut_list.blockSignals(was_blocked)
         self.delete_cut_button.setEnabled(len(self.cuts) > 1)
+        self.refresh_timeline_cuts()
 
     def sync_active_cut_from_widgets(self):
         if not self.cuts:
@@ -2174,6 +2185,7 @@ class MainWindow(QMainWindow):
         self._syncing = False
         self.update_crop_size_fields()
         self.update_suffix_placeholder()
+        self.refresh_timeline_cuts()
 
     def trim_seconds_for_cut(self, cut):
         """Resolve a Cut's start/end to seconds without touching any live widget -
@@ -2188,14 +2200,28 @@ class MainWindow(QMainWindow):
             end = self.keyframe_time(cut.end_repr) if cut.end_repr is not None else self.duration
         return start, end
 
-    def on_trim_changed(self, start, end):
-        if self._syncing:
+    def refresh_timeline_cuts(self):
+        if not self.duration:
+            self.scrubber.set_cuts([])
             return
-        self._syncing = True
-        self.write_start_field(start)
-        self.write_end_field(end)
-        self._syncing = False
-        self.update_suffix_placeholder()
+        segments = []
+        for i, cut in enumerate(self.cuts):
+            start, end = self.trim_seconds_for_cut(cut)
+            segments.append((start, end, i == self.active_cut))
+        self.scrubber.set_cuts(segments)
+
+    def on_segment_edited(self, index, start, end):
+        if index != self.active_cut:
+            self.sync_active_cut_from_widgets()
+            self.select_cut(index)
+        cut = self.cuts[index]
+        if cut.frame_mode:
+            self.write_start_field(start)
+            self.write_end_field(end)
+        else:
+            self.start_keyframe_edit.setText(str(self.keyframe_index_of(start)))
+            self.end_keyframe_edit.setText(str(self.keyframe_index_of(end)))
+        self.refresh_timeline_cuts()
 
     def keyframe_time(self, idx):
         if not self.keyframe_times:
