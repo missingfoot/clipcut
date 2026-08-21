@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
@@ -207,7 +207,7 @@ class Cut:
     start_repr: int = 0
     end_repr: int | None = None
     frame_mode: bool = True
-    crop: tuple | None = None
+    crop: tuple[int, int, int, int] | None = None
 
 
 class GuideItem(QGraphicsRectItem):
@@ -2043,6 +2043,8 @@ class MainWindow(QMainWindow):
             self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
 
     def on_cut_mode_changed(self, is_frame):
+        if self._syncing:
+            return
         self.frame_mode = is_frame
         self.scrubber.set_keyframes([] if is_frame else self.keyframe_times)
         self.frame_start_widget.setVisible(is_frame)
