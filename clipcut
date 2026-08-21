@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
@@ -1344,6 +1346,18 @@ class MainWindow(QMainWindow):
         cut_mode_row.addWidget(self.cut_mode_frame)
         cut_mode_row.addWidget(self.cut_mode_keyframe)
 
+        self.cut_list = QListWidget()
+        self.cut_list.setMaximumHeight(100)
+        self.cut_list.currentRowChanged.connect(self.on_cut_list_selected)
+
+        cut_list_buttons = QHBoxLayout()
+        self.add_cut_button = QPushButton("Add Cut")
+        self.add_cut_button.clicked.connect(self.add_cut)
+        self.delete_cut_button = QPushButton("Delete Cut")
+        self.delete_cut_button.clicked.connect(self.delete_cut)
+        cut_list_buttons.addWidget(self.add_cut_button)
+        cut_list_buttons.addWidget(self.delete_cut_button)
+
         cut_note = make_note(
             "Frame: precise, but needs re-encode (not fully lossless). "
             "Keyframe: lossless, snaps to nearest keyframe.")
@@ -1361,6 +1375,9 @@ class MainWindow(QMainWindow):
         cut_tab_layout.addWidget(self.frame_end_widget)
         cut_tab_layout.addWidget(self.keyframe_start_widget)
         cut_tab_layout.addWidget(self.keyframe_end_widget)
+        cut_tab_layout.addWidget(make_separator())
+        cut_tab_layout.addWidget(self.cut_list)
+        cut_tab_layout.addLayout(cut_list_buttons)
         cut_tab_layout.addStretch()
         self.keyframe_start_widget.hide()
         self.keyframe_end_widget.hide()
@@ -1646,6 +1663,7 @@ class MainWindow(QMainWindow):
         self.cuts = [Cut(frame_mode=self.frame_mode)]
         self.active_cut = 0
         self.shared_crop = (0, 0, 0, 0)
+        self.refresh_cut_list()
         self.start_keyframe_edit.clear()
         self.end_keyframe_edit.clear()
         for field in self.frame_edits:
@@ -1701,6 +1719,7 @@ class MainWindow(QMainWindow):
         self.video_fps = None
         self.keyframe_times = []
         self.cuts = []
+        self.cut_list.clear()
         self.active_cut = 0
         self.shared_crop = (0, 0, 0, 0)
         self.filename_label.setText("Drag and drop or choose a file")
@@ -2031,6 +2050,7 @@ class MainWindow(QMainWindow):
         else:
             idx = self.keyframe_index_of(seconds)
             self.start_keyframe_edit.setText("" if idx <= 0 else str(idx))
+        self.sync_active_cut_from_widgets()
 
     def write_end_field(self, seconds):
         """Write an End value, but leave the field blank instead of a concrete number
@@ -2041,6 +2061,7 @@ class MainWindow(QMainWindow):
             self.end_frame_edit.setText("" if at_end else str(round(seconds * fps)))
         else:
             self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
+        self.sync_active_cut_from_widgets()
 
     def on_cut_mode_changed(self, is_frame):
         if self._syncing:
@@ -2068,6 +2089,62 @@ class MainWindow(QMainWindow):
             self.write_end_field(end)
             self._syncing = False
         self.update_suffix_placeholder()
+        self.sync_active_cut_from_widgets()
+
+    def cut_start_seconds(self, cut):
+        """Best-effort start time in seconds for sorting/display - reuses
+        keyframe_time/fps math without touching the live widgets."""
+        if cut.frame_mode:
+            return cut.start_repr / (self.video_fps or 30.0)
+        return self.keyframe_time(cut.start_repr)
+
+    def refresh_cut_list(self):
+        was_blocked = self.cut_list.blockSignals(True)
+        self.cut_list.clear()
+        ordered = sorted(range(len(self.cuts)), key=lambda i: self.cut_start_seconds(self.cuts[i]))
+        for row, cut_index in enumerate(ordered):
+            self.cut_list.addItem(f"{row + 1}: cut")
+            self.cut_list.item(row).setData(Qt.UserRole, cut_index)
+            if cut_index == self.active_cut:
+                self.cut_list.setCurrentRow(row)
+        self.cut_list.blockSignals(was_blocked)
+        self.delete_cut_button.setEnabled(len(self.cuts) > 1)
+
+    def sync_active_cut_from_widgets(self):
+        if not self.cuts:
+            return
+        cut = self.cuts[self.active_cut]
+        cut.frame_mode = self.frame_mode
+        start_edit = self.start_frame_edit if self.frame_mode else self.start_keyframe_edit
+        end_edit = self.end_frame_edit if self.frame_mode else self.end_keyframe_edit
+        cut.start_repr = int(start_edit.text()) if start_edit.text() else 0
+        cut.end_repr = int(end_edit.text()) if end_edit.text() else None
+        if self.per_cut_crop_enabled:
+            texts = [e.text() for e in self.crop_edits]
+            if any(texts):
+                cut.crop = tuple(int(t) if t else 0 for t in texts)
+
+    def add_cut(self):
+        if not self.path:
+            return
+        self.sync_active_cut_from_widgets()
+        self.cuts.append(Cut(frame_mode=self.frame_mode))
+        self.select_cut(len(self.cuts) - 1)
+        self.refresh_cut_list()
+
+    def delete_cut(self):
+        if len(self.cuts) <= 1:
+            return
+        del self.cuts[self.active_cut]
+        self.select_cut(max(0, self.active_cut - 1))
+        self.refresh_cut_list()
+
+    def on_cut_list_selected(self, row):
+        if row < 0 or not self.cuts:
+            return
+        self.sync_active_cut_from_widgets()
+        cut_index = self.cut_list.item(row).data(Qt.UserRole)
+        self.select_cut(cut_index)
 
     def select_cut(self, index):
         """Push cuts[index]'s data into the Start/End/mode widgets (and crop
