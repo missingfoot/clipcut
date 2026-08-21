@@ -968,7 +968,17 @@ Change `export_queue`'s entries from `(cmd, out_path)` to `(cmd, out_path, targe
 
 - [ ] **Step 4: Update `on_process_finished` to advance the queue instead of just finishing**
 
-Replace the existing success branch (the part of `on_process_finished` that runs after the `if exit_code != 0:` early return) so that on success it calls `self.run_next_export()` instead of directly setting "Saved successfully" - `run_next_export` now owns the terminal "Saved successfully" status once the queue is empty (Step 2). Keep the failure branch (`if exit_code != 0:`) exactly as it is today, except also clear `self.export_queue = []` so a failed cut doesn't leave stale queued exports for the next unrelated click of Process.
+`on_process_finished`'s current success branch does two things: preserves the source file's modified-time on the output (`os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))` - this is a core, documented feature of the app, not incidental; see the module docstring and the PKGBUILD's `pkgdesc`), and sets the "Saved successfully" status. Multi-cut export must preserve mtime on **every** exported file, not just skip it - so keep the `os.utime` call, applied to `self.pending_out_path` (the file that just finished), but replace only the final status-setting with a call to `self.run_next_export()`, which now owns the terminal "Saved successfully" status once the queue is actually empty (Step 2/3). Concretely, the success branch (after the existing `if exit_code != 0: ... return`) becomes:
+
+```python
+        out_path = self.pending_out_path
+        src_stat = self.path.stat()
+        os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
+        self.error_details_button.setVisible(False)
+        self.run_next_export()
+```
+
+Keep the failure branch (`if exit_code != 0:`) exactly as it is today, except also clear `self.export_queue = []` so a failed cut doesn't leave stale queued exports for the next unrelated click of Process.
 
 - [ ] **Step 5: Verify with an offscreen script**
 
@@ -1002,6 +1012,11 @@ out1 = src.with_name(f"{src.stem}_cut_1{src.suffix}")
 out2 = src.with_name(f"{src.stem}_cut_2{src.suffix}")
 assert out1.exists(), f"missing {out1}"
 assert out2.exists(), f"missing {out2}"
+# mtime preservation is a core, pre-existing app feature - confirm it survived
+# the multi-cut queue rewrite for BOTH exported files, not just the last one.
+src_mtime = int(src.stat().st_mtime)
+assert int(out1.stat().st_mtime) == src_mtime, "cut 1 lost mtime preservation"
+assert int(out2.stat().st_mtime) == src_mtime, "cut 2 lost mtime preservation"
 out1.unlink(); out2.unlink()
 print("OK")
 EOF
