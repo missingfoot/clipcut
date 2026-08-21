@@ -188,7 +188,6 @@ class GuideItem(QGraphicsRectItem):
     """A draggable crop guide line. Calls back with its new scene-coordinate
     position (y for horizontal guides, x for vertical) while dragged."""
 
-    ACTIVE_COLOR = QColor(255, 0, 255)
     INACTIVE_COLOR = QColor(255, 255, 255, 60)
     HIT_PADDING = 5  # grabbable area extends this far past the 1px visual line on each side
 
@@ -198,6 +197,7 @@ class GuideItem(QGraphicsRectItem):
         self.on_press = on_press
         self.on_drag = on_drag
         self.on_double_click = on_double_click
+        self.active_color = QColor(255, 0, 255)
         self.setCursor(Qt.SizeVerCursor if orientation == "h" else Qt.SizeHorCursor)
         self.setPen(Qt.NoPen)
         self.setBrush(Qt.NoBrush)
@@ -211,8 +211,12 @@ class GuideItem(QGraphicsRectItem):
             self._active = active
             self.update()
 
+    def set_active_color(self, color):
+        self.active_color = color
+        self.update()
+
     def paint(self, painter, _option, _widget=None):
-        painter.fillRect(self.rect(), self.ACTIVE_COLOR if self._active else self.INACTIVE_COLOR)
+        painter.fillRect(self.rect(), self.active_color if self._active else self.INACTIVE_COLOR)
 
     def boundingRect(self):
         # Wider than the painted line so the guide isn't a finnicky 1px target to grab.
@@ -414,12 +418,13 @@ class VideoPreview(QGraphicsView):
             self.gscene.addItem(c)
             c.hide()
 
+        self.black_preview = False
+        self.bg_color = QColor(0, 0, 0)
         self.shade_top = QGraphicsRectItem()
         self.shade_bottom = QGraphicsRectItem()
         self.shade_left = QGraphicsRectItem()
         self.shade_right = QGraphicsRectItem()
         for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
-            s.setBrush(QColor(0, 0, 0, 140))
             s.setPen(Qt.NoPen)
             s.setZValue(5)
             self.gscene.addItem(s)
@@ -631,6 +636,22 @@ class VideoPreview(QGraphicsView):
         self.show_center = show
         self.refresh_overlay()
 
+    def set_black_preview(self, enabled):
+        """"Black" crop style: solid opaque mask outside the crop with no guides, corner
+        handles, or center cross drawn over it - a clean look at the actual result instead
+        of the editable "Guides" overlay. The hit areas hide along with their visuals, so
+        editing is effectively paused while this is on."""
+        self.black_preview = enabled
+        self.refresh_overlay()
+
+    def set_bg_color(self, color):
+        self.bg_color = color
+        self.refresh_overlay()
+
+    def set_line_color(self, color):
+        for g in (self.guide_left, self.guide_right, self.guide_top, self.guide_bottom):
+            g.set_active_color(color)
+
     def refresh_overlay(self):
         rect = self.content_rect()
         full = self.viewport().rect()
@@ -664,12 +685,16 @@ class VideoPreview(QGraphicsView):
         self.guide_right.set_active(self.guide_active["right"])
         self.guide_top.set_active(self.guide_active["top"])
         self.guide_bottom.set_active(self.guide_active["bottom"])
+        for g in (self.guide_left, self.guide_right, self.guide_top, self.guide_bottom):
+            g.setVisible(not self.black_preview)
 
         h_active = self.guide_active["left"] and self.guide_active["right"]
         v_active = self.guide_active["top"] and self.guide_active["bottom"]
         self.crop_move.setRect(gx_left + t, gy_top + t,
                                 max(0, gx_right - gx_left - 2 * t), max(0, gy_bottom - gy_top - 2 * t))
         self.crop_move.set_axes(h_active, v_active)
+        if self.black_preview:
+            self.crop_move.hide()
 
         all_active = h_active and v_active
         s = CornerResizeItem.SIZE
@@ -681,19 +706,27 @@ class VideoPreview(QGraphicsView):
         }
         for corner, (cx, cy) in corner_pos.items():
             corner.setRect(cx - s / 2, cy - s / 2, s, s)
-            corner.setVisible(all_active)
+            corner.setVisible(all_active and not self.black_preview)
 
+        shade_alpha = 255 if self.black_preview else 140
+        shade_color = QColor(self.bg_color)
+        shade_color.setAlpha(shade_alpha)
+        for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
+            s.setBrush(shade_color)
         self.shade_left.setRect(0, 0, max(0, gx_left), full.height())
         self.shade_right.setRect(gx_right, 0, max(0, full.width() - gx_right), full.height())
         self.shade_top.setRect(0, 0, full.width(), max(0, gy_top))
         self.shade_bottom.setRect(0, gy_bottom, full.width(), max(0, full.height() - gy_bottom))
 
-        mid_x = (gx_left + gx_right) / 2
-        mid_y = (gy_top + gy_bottom) / 2
-        self.center_v.setRect(mid_x - t / 2, gy_top, t, max(0, gy_bottom - gy_top))
-        self.center_h.setRect(gx_left, mid_y - t / 2, max(0, gx_right - gx_left), t)
-        self.center_h.setVisible(self.show_center)
-        self.center_v.setVisible(self.show_center)
+        # Whole-pixel midpoint, same reasoning as the guides above: a fractional position
+        # (plus the old -t/2 centering) lands the 1px line on a half-pixel and blurs it
+        # across two under antialiasing instead of landing crisply on one.
+        mid_x = int(round((gx_left + gx_right) / 2))
+        mid_y = int(round((gy_top + gy_bottom) / 2))
+        self.center_v.setRect(mid_x, gy_top, t, max(0, gy_bottom - gy_top))
+        self.center_h.setRect(gx_left, mid_y, max(0, gx_right - gx_left), t)
+        self.center_h.setVisible(self.show_center and not self.black_preview)
+        self.center_v.setVisible(self.show_center and not self.black_preview)
 
     def _effective_ratio(self, box_w0, box_h0):
         """The ratio a locked edit should target, or None if edits should be free right
@@ -1013,6 +1046,25 @@ class Scrubber(QWidget):
         self.update()
 
 
+BG_COLOR_CHOICES = (
+    ("Black", QColor(0, 0, 0)),
+    ("White", QColor(255, 255, 255)),
+    ("Mid Grey", QColor(128, 128, 128)),
+)
+
+LINE_COLOR_CHOICES = (
+    ("Magenta", QColor(255, 0, 255)),
+    ("White", QColor(255, 255, 255)),
+    ("Black", QColor(0, 0, 0)),
+    ("Lime Green", QColor(0, 255, 0)),
+    ("Red", QColor(255, 0, 0)),
+    ("Blue", QColor(0, 0, 255)),
+    ("Cyan", QColor(0, 255, 255)),
+    ("Orange", QColor(255, 165, 0)),
+    ("Yellow", QColor(255, 255, 0)),
+)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, initial_path=None):
         super().__init__()
@@ -1277,12 +1329,42 @@ class MainWindow(QMainWindow):
         self.show_center_check.toggled.connect(self.preview.set_show_center)
         self.show_center_check.setEnabled(False)
 
+        crop_style_row = QHBoxLayout()
+        crop_style_row.addWidget(QLabel("Crop style"))
+        self.crop_style_combo = QComboBox()
+        self.crop_style_combo.addItems(("Default", "Preview"))
+        self.crop_style_combo.currentIndexChanged.connect(
+            lambda i: self.preview.set_black_preview(i == 1))
+        self.crop_style_combo.setEnabled(False)
+        crop_style_row.addWidget(self.crop_style_combo, stretch=1)
+
+        bg_color_row = QHBoxLayout()
+        bg_color_row.addWidget(QLabel("Background"))
+        self.bg_color_combo = QComboBox()
+        self.bg_color_combo.addItems([name for name, _ in BG_COLOR_CHOICES])
+        self.bg_color_combo.currentIndexChanged.connect(
+            lambda i: self.preview.set_bg_color(BG_COLOR_CHOICES[i][1]))
+        self.bg_color_combo.setEnabled(False)
+        bg_color_row.addWidget(self.bg_color_combo, stretch=1)
+
+        line_color_row = QHBoxLayout()
+        line_color_row.addWidget(QLabel("Crop lines"))
+        self.line_color_combo = QComboBox()
+        self.line_color_combo.addItems([name for name, _ in LINE_COLOR_CHOICES])
+        self.line_color_combo.currentIndexChanged.connect(
+            lambda i: self.preview.set_line_color(LINE_COLOR_CHOICES[i][1]))
+        self.line_color_combo.setEnabled(False)
+        line_color_row.addWidget(self.line_color_combo, stretch=1)
+
         crop_tab_page = QWidget()
         crop_tab_layout = QVBoxLayout(crop_tab_page)
         crop_tab_layout.setContentsMargins(8, 8, 8, 8)
         crop_tab_layout.setSpacing(8)
         crop_tab_layout.addLayout(aspect_row)
         crop_tab_layout.addLayout(crop_grid)
+        crop_tab_layout.addLayout(crop_style_row)
+        crop_tab_layout.addLayout(bg_color_row)
+        crop_tab_layout.addLayout(line_color_row)
         crop_tab_layout.addWidget(self.show_center_check)
         crop_tab_layout.addWidget(self.crop_dims_label)
         crop_tab_layout.addWidget(crop_note)
@@ -1444,6 +1526,9 @@ class MainWindow(QMainWindow):
         self.clear_crop_button.setEnabled(True)
         self.show_center_check.setEnabled(True)
         self.lock_aspect_check.setEnabled(True)
+        self.crop_style_combo.setEnabled(True)
+        self.bg_color_combo.setEnabled(True)
+        self.line_color_combo.setEnabled(True)
         self.process_button.setEnabled(True)
         self.play_button.setEnabled(True)
         self.step_back_button.setEnabled(True)
@@ -1488,6 +1573,9 @@ class MainWindow(QMainWindow):
         self.clear_crop_button.setEnabled(False)
         self.show_center_check.setEnabled(False)
         self.lock_aspect_check.setEnabled(False)
+        self.crop_style_combo.setEnabled(False)
+        self.bg_color_combo.setEnabled(False)
+        self.line_color_combo.setEnabled(False)
         self.process_button.setEnabled(False)
         self.play_button.setEnabled(False)
         self.step_back_button.setEnabled(False)
