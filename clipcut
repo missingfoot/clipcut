@@ -2248,14 +2248,18 @@ class MainWindow(QMainWindow):
 
         times = sorted(set(t for t in times if 0 < t < self.duration))
         boundaries = [0.0] + times + [self.duration]
+        segments = list(zip(boundaries, boundaries[1:]))
         new_cuts = []
-        for start, end in zip(boundaries, boundaries[1:]):
+        for i, (start, end) in enumerate(segments):
+            is_last = i == len(segments) - 1
             if self.frame_mode:
                 fps = self.video_fps or 30.0
-                new_cuts.append(Cut(start_repr=round(start * fps), end_repr=round(end * fps), frame_mode=True))
+                end_repr = None if is_last else round(end * fps)
+                new_cuts.append(Cut(start_repr=round(start * fps), end_repr=end_repr, frame_mode=True))
             else:
+                end_repr = None if is_last else self.keyframe_index_of(end)
                 new_cuts.append(Cut(start_repr=self.keyframe_index_of(start),
-                                     end_repr=self.keyframe_index_of(end), frame_mode=False))
+                                     end_repr=end_repr, frame_mode=False))
         self.cuts = new_cuts
         self.select_cut(0)
         self.refresh_cut_list()
