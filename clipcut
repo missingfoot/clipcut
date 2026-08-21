@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
@@ -190,6 +190,7 @@ class GuideItem(QGraphicsRectItem):
 
     ACTIVE_COLOR = QColor(255, 0, 255)
     INACTIVE_COLOR = QColor(255, 255, 255, 60)
+    HIT_PADDING = 5  # grabbable area extends this far past the 1px visual line on each side
 
     def __init__(self, orientation, on_drag, on_double_click):
         super().__init__()
@@ -211,6 +212,17 @@ class GuideItem(QGraphicsRectItem):
 
     def paint(self, painter, _option, _widget=None):
         painter.fillRect(self.rect(), self.ACTIVE_COLOR if self._active else self.INACTIVE_COLOR)
+
+    def boundingRect(self):
+        # Wider than the painted line so the guide isn't a finnicky 1px target to grab.
+        pad = self.HIT_PADDING
+        return self.rect().adjusted(0, -pad, 0, pad) if self.orientation == "h" \
+            else self.rect().adjusted(-pad, 0, pad, 0)
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
 
     def mousePressEvent(self, event):
         self._dragging = True
@@ -689,15 +701,18 @@ class VideoPreview(QGraphicsView):
         self.guides_changed.emit(left, top, right, bottom, True)
 
     def _corner_dragged(self, h_edge, v_edge, scene_pos):
+        # Corners always scale proportionally (opposite edges fixed) rather than resizing
+        # the two edges independently - using the preset's ratio if one is locked, or
+        # else whatever ratio the box already had when this drag started.
         rect = self.content_rect()
         sx = rect.width() / self.video_width
         sy = rect.height() / self.video_height
+        left0, top0, right0, bottom0 = self._crop_at_drag_start
+        box_w0 = self.video_width - left0 - right0
+        box_h0 = self.video_height - top0 - bottom0
+        ratio = self.locked_ratio or (box_w0 / box_h0 if box_h0 > 0 else None)
 
-        locked = bool(self.locked_ratio)
-        if locked:
-            # An aspect-ratio preset is active: the preset is a lock, so corners scale
-            # the box proportionally (opposite edges fixed) instead of resizing freely.
-            left0, top0, right0, bottom0 = self._crop_at_drag_start
+        if ratio:
             fixed_h, anchor_x = (right0, rect.right() - int(right0 * sx)) if h_edge == "left" \
                 else (left0, rect.left() + int(left0 * sx))
             fixed_v, anchor_y = (bottom0, rect.bottom() - int(bottom0 * sy)) if v_edge == "top" \
@@ -708,17 +723,28 @@ class VideoPreview(QGraphicsView):
             # Two candidate boxes, one driven by the horizontal delta and one by the
             # vertical delta; take whichever is larger so the box tracks the cursor's
             # dominant drag direction instead of always following one fixed axis.
-            candidate_by_x = (w_from_dx, w_from_dx / self.locked_ratio)
-            candidate_by_y = (h_from_dy * self.locked_ratio, h_from_dy)
+            candidate_by_x = (w_from_dx, w_from_dx / ratio)
+            candidate_by_y = (h_from_dy * ratio, h_from_dy)
             box_w_px, box_h_px = max(candidate_by_x, candidate_by_y, key=lambda wh: wh[0] * wh[1])
 
             box_w_vid = box_w_px / sx
             box_h_vid = box_h_px / sy
+            # Cap both dimensions together (not independently) so hitting the video's edge
+            # on one axis scales the whole box back instead of letting the other axis keep
+            # growing alone and breaking the ratio.
+            max_w = self.video_width - fixed_h
+            max_h = self.video_height - fixed_v
+            over = max(box_w_vid / max_w if max_w > 0 else 1, box_h_vid / max_h if max_h > 0 else 1)
+            if over > 1:
+                box_w_vid /= over
+                box_h_vid /= over
             new_h = max(0, min(self.video_width - 1, int(self.video_width - fixed_h - box_w_vid)))
             new_v = max(0, min(self.video_height - 1, int(self.video_height - fixed_v - box_h_vid)))
             left, right = (new_h, fixed_h) if h_edge == "left" else (fixed_h, new_h)
             top, bottom = (new_v, fixed_v) if v_edge == "top" else (fixed_v, new_v)
         else:
+            # Degenerate case: the box had zero height/width at drag start, so there's no
+            # ratio to preserve - fall back to resizing the two edges independently.
             left, top, right, bottom = self.crop
             if h_edge == "left":
                 left = max(0, min(self.video_width - 1, int((scene_pos.x() - rect.left()) / sx)))
@@ -731,7 +757,9 @@ class VideoPreview(QGraphicsView):
 
         self.crop = (left, top, right, bottom)
         self.refresh_overlay()
-        self.guides_changed.emit(left, top, right, bottom, locked)
+        # Corner drags are always ratio-preserving by construction, so they never need
+        # to break an active preset lock.
+        self.guides_changed.emit(left, top, right, bottom, True)
 
     def _guide_reset(self, which):
         left, top, right, bottom = self.crop
@@ -1097,6 +1125,9 @@ class MainWindow(QMainWindow):
         crop_grid.setColumnStretch(2, 1)
         self.crop_dims_label = make_note("")
         crop_note = make_note("Cropping requires re-encode (not fully lossless)")
+        self.clear_crop_button = QPushButton("Clear Crop")
+        self.clear_crop_button.clicked.connect(self.clear_crop)
+        self.clear_crop_button.setEnabled(False)
 
         crop_tab_page = QWidget()
         crop_tab_layout = QVBoxLayout(crop_tab_page)
@@ -1106,6 +1137,7 @@ class MainWindow(QMainWindow):
         crop_tab_layout.addLayout(crop_grid)
         crop_tab_layout.addWidget(self.crop_dims_label)
         crop_tab_layout.addWidget(crop_note)
+        crop_tab_layout.addWidget(self.clear_crop_button)
         crop_tab_layout.addStretch()
 
         # --- Audio tab (page 3) ---
@@ -1260,6 +1292,7 @@ class MainWindow(QMainWindow):
         self.orient_horizontal.setChecked(True)
         self.orient_horizontal.setEnabled(True)
         self.orient_vertical.setEnabled(True)
+        self.clear_crop_button.setEnabled(True)
         self.process_button.setEnabled(True)
         self.play_button.setEnabled(True)
         self.step_back_button.setEnabled(True)
@@ -1301,6 +1334,7 @@ class MainWindow(QMainWindow):
         self.orient_horizontal.setChecked(True)
         self.orient_horizontal.setEnabled(False)
         self.orient_vertical.setEnabled(False)
+        self.clear_crop_button.setEnabled(False)
         self.process_button.setEnabled(False)
         self.play_button.setEnabled(False)
         self.step_back_button.setEnabled(False)
@@ -1320,6 +1354,10 @@ class MainWindow(QMainWindow):
         self.time_label.setText("0:00 / 0:00")
 
     # --- video preview <-> crop field sync ---
+
+    def clear_crop(self):
+        for field in self.crop_edits:
+            field.clear()
 
     def on_crop_fields_changed(self):
         self.update_suffix_placeholder()
