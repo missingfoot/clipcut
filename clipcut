@@ -1420,6 +1420,11 @@ class MainWindow(QMainWindow):
         self.lock_aspect_check.setEnabled(False)
         aspect_row.addWidget(self.lock_aspect_check)
 
+        self.per_cut_crop_check = QCheckBox("Per-Cut Crop")
+        self.per_cut_crop_check.toggled.connect(self.on_per_cut_crop_toggled)
+        self.per_cut_crop_check.setEnabled(False)
+        aspect_row.addWidget(self.per_cut_crop_check)
+
         crop_grid = QGridLayout()
         self.crop_left = NumberLineEdit()
         self.crop_top = NumberLineEdit()
@@ -1472,6 +1477,9 @@ class MainWindow(QMainWindow):
         self.clear_crop_button = QPushButton("Clear Crop")
         self.clear_crop_button.clicked.connect(self.clear_crop)
         self.clear_crop_button.setEnabled(False)
+        self.reset_cut_crop_button = QPushButton("Reset to Shared Crop")
+        self.reset_cut_crop_button.clicked.connect(self.reset_cut_crop)
+        self.reset_cut_crop_button.setEnabled(False)
         self.show_center_check = QCheckBox("Show Center")
         self.show_center_check.toggled.connect(self.preview.set_show_center)
         self.show_center_check.setEnabled(False)
@@ -1521,6 +1529,7 @@ class MainWindow(QMainWindow):
         crop_tab_layout.addWidget(make_separator())
         crop_tab_layout.addWidget(self.recenter_crop_button)
         crop_tab_layout.addWidget(self.clear_crop_button)
+        crop_tab_layout.addWidget(self.reset_cut_crop_button)
         crop_tab_layout.addStretch()
 
         # --- Audio tab (page 3) ---
@@ -1693,6 +1702,8 @@ class MainWindow(QMainWindow):
         self.crop_x_edit.setEnabled(True)
         self.crop_y_edit.setEnabled(True)
         self.clear_crop_button.setEnabled(True)
+        self.per_cut_crop_check.setEnabled(True)
+        self.reset_cut_crop_button.setEnabled(self.per_cut_crop_enabled)
         self.show_center_check.setEnabled(True)
         self.show_thirds_check.setEnabled(True)
         self.lock_aspect_check.setEnabled(True)
@@ -1756,6 +1767,8 @@ class MainWindow(QMainWindow):
         self.orient_vertical.setEnabled(False)
         self.recenter_crop_button.setEnabled(False)
         self.clear_crop_button.setEnabled(False)
+        self.per_cut_crop_check.setEnabled(False)
+        self.reset_cut_crop_button.setEnabled(False)
         self.show_center_check.setEnabled(False)
         self.show_thirds_check.setEnabled(False)
         self.lock_aspect_check.setEnabled(False)
@@ -1801,6 +1814,7 @@ class MainWindow(QMainWindow):
             edit.setText(str(value))
         self._syncing = False
         self.preview.set_crop_pixels(new_left, new_top, new_right, new_bottom)
+        self.set_current_crop(new_left, new_top, new_right, new_bottom)
         self.update_crop_size_fields()
 
     def on_crop_size_field_edited(self, which):
@@ -1853,8 +1867,10 @@ class MainWindow(QMainWindow):
                 self.crop_width_edit.setText(str(target_w))
                 self.crop_height_edit.setText(str(target_h))
                 self.preview.apply_scaled_crop(left, top, right, bottom)
+                self.set_current_crop(left, top, right, bottom)
             else:
                 self.preview.set_crop_pixels(left, top, right, bottom)
+                self.set_current_crop(left, top, right, bottom)
                 self.break_aspect_lock()
         except ValueError:
             pass
@@ -1887,6 +1903,7 @@ class MainWindow(QMainWindow):
             for edit, value in zip(self.crop_edits, (left, top, right, bottom)):
                 edit.setText(str(value))
             self.preview.apply_scaled_crop(left, top, right, bottom)
+            self.set_current_crop(left, top, right, bottom)
         except ValueError:
             pass
         finally:
@@ -1902,6 +1919,7 @@ class MainWindow(QMainWindow):
             field.clear()
         self._syncing = False
         self.preview.set_crop_pixels(0, 0, 0, 0)
+        self.set_current_crop(0, 0, 0, 0)
         self.update_suffix_placeholder()
         self.update_crop_size_fields()
 
@@ -1918,6 +1936,7 @@ class MainWindow(QMainWindow):
             if new_value < 0:
                 raise ValueError("crop value must be >= 0")
             left, top, right, bottom, locked = self.preview.set_edge(which, new_value)
+            self.set_current_crop(left, top, right, bottom)
             for target_edit, value in zip(self.crop_edits, (left, top, right, bottom)):
                 target_edit.setText(str(value))
             if not locked:
@@ -1961,6 +1980,7 @@ class MainWindow(QMainWindow):
             edit.setText(str(value))
         self._syncing = False
         self.preview.set_crop_pixels(left, top, right, bottom)
+        self.set_current_crop(left, top, right, bottom)
         self.preview.set_all_guides_active(ratio is not None)
         self.preview.set_locked_ratio(ratio)
         self.update_crop_size_fields()
@@ -1974,6 +1994,7 @@ class MainWindow(QMainWindow):
             self.preview.set_locked_ratio(None)
 
     def on_guides_changed(self, left, top, right, bottom, preserves_ratio):
+        self.set_current_crop(left, top, right, bottom)
         if not preserves_ratio:
             self.break_aspect_lock()
         if self._syncing:
@@ -2186,6 +2207,43 @@ class MainWindow(QMainWindow):
         self.update_crop_size_fields()
         self.update_suffix_placeholder()
         self.refresh_timeline_cuts()
+
+    def current_crop_target(self):
+        if not self.per_cut_crop_enabled:
+            return self.shared_crop
+        cut = self.cuts[self.active_cut]
+        if cut.crop is None:
+            cut.crop = self.shared_crop
+        return cut.crop
+
+    def set_current_crop(self, left, top, right, bottom):
+        if self.per_cut_crop_enabled:
+            self.cuts[self.active_cut].crop = (left, top, right, bottom)
+        else:
+            self.shared_crop = (left, top, right, bottom)
+
+    def on_per_cut_crop_toggled(self, enabled):
+        self.per_cut_crop_enabled = enabled
+        self.reset_cut_crop_button.setEnabled(enabled)
+        if self.path:
+            # Read-only resolution, same as select_cut - toggling the checkbox only
+            # changes which crop is *displayed*; it must not itself seed an override
+            # onto the active cut the way an actual edit (current_crop_target) would.
+            if enabled:
+                cut = self.cuts[self.active_cut]
+                crop = cut.crop if cut.crop is not None else self.shared_crop
+            else:
+                crop = self.shared_crop
+            self.preview.set_crop_pixels(*crop)
+            self.update_crop_size_fields()
+
+    def reset_cut_crop(self):
+        if not self.per_cut_crop_enabled or not self.cuts:
+            return
+        self.cuts[self.active_cut].crop = None
+        crop = self.current_crop_target()
+        self.preview.set_crop_pixels(*crop)
+        self.update_crop_size_fields()
 
     def trim_seconds_for_cut(self, cut):
         """Resolve a Cut's start/end to seconds without touching any live widget -
