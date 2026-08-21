@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -1386,6 +1387,19 @@ class MainWindow(QMainWindow):
         cut_tab_layout.addWidget(make_separator())
         cut_tab_layout.addWidget(self.cut_list)
         cut_tab_layout.addLayout(cut_list_buttons)
+
+        self.scene_threshold_edit = NumberLineEdit()
+        self.scene_threshold_edit.setText("30")
+        self.scene_threshold_edit.setMaximumWidth(60)
+        self.detect_scenes_button = QPushButton("Detect Scenes...")
+        self.detect_scenes_button.clicked.connect(self.detect_scenes)
+        self.detect_scenes_button.setEnabled(False)
+        scene_row = QHBoxLayout()
+        scene_row.addWidget(QLabel("Sensitivity %"))
+        scene_row.addWidget(self.scene_threshold_edit)
+        scene_row.addWidget(self.detect_scenes_button)
+        cut_tab_layout.addLayout(scene_row)
+
         cut_tab_layout.addStretch()
         self.keyframe_start_widget.hide()
         self.keyframe_end_widget.hide()
@@ -1735,6 +1749,7 @@ class MainWindow(QMainWindow):
         self.remove_file_button.setEnabled(True)
         self.set_start_button.setEnabled(True)
         self.set_end_button.setEnabled(True)
+        self.detect_scenes_button.setEnabled(True)
         self.status.setText("")
         self.update_suffix_placeholder()
 
@@ -1800,6 +1815,7 @@ class MainWindow(QMainWindow):
         self.remove_file_button.setEnabled(False)
         self.set_start_button.setEnabled(False)
         self.set_end_button.setEnabled(False)
+        self.detect_scenes_button.setEnabled(False)
         self.status.setText("")
         self.update_suffix_placeholder()
 
@@ -2185,6 +2201,65 @@ class MainWindow(QMainWindow):
         del self.cuts[self.active_cut]
         self.select_cut(max(0, self.active_cut - 1))
         self.refresh_cut_list()
+
+    def detect_scenes(self):
+        if not self.path:
+            return
+        has_work = len(self.cuts) > 1 or any(c.crop is not None for c in self.cuts)
+        if has_work:
+            reply = QMessageBox.question(
+                self, "Replace Cuts?",
+                "Scene detection replaces the entire cut list. Continue and discard the current cuts?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        threshold = int(self.scene_threshold_edit.text() or 30) / 100.0
+        self.scene_detect_output = ""
+        self.detect_scenes_button.setEnabled(False)
+        self.status.setText("Detecting scenes...")
+        self.scene_process = QProcess(self)
+        self.scene_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.scene_process.readyReadStandardOutput.connect(self.on_scene_detect_output)
+        self.scene_process.finished.connect(self.on_scene_detect_finished)
+        self.scene_process.start("ffmpeg", [
+            "-i", str(self.path),
+            "-vf", f"select='gt(scene,{threshold})',showinfo",
+            "-f", "null", "-"])
+
+    def on_scene_detect_output(self):
+        data = bytes(self.scene_process.readAllStandardOutput()).decode(errors="replace")
+        self.scene_detect_output += data
+
+    def on_scene_detect_finished(self, _exit_code, _exit_status):
+        self.detect_scenes_button.setEnabled(True)
+        times = []
+        for line in self.scene_detect_output.splitlines():
+            marker = "pts_time:"
+            if marker in line:
+                chunk = line.split(marker, 1)[1].split()[0]
+                try:
+                    times.append(float(chunk))
+                except ValueError:
+                    pass
+        self.scene_process = None
+        if not times:
+            self.status.setText("No scene changes detected")
+            return
+
+        times = sorted(set(t for t in times if 0 < t < self.duration))
+        boundaries = [0.0] + times + [self.duration]
+        new_cuts = []
+        for start, end in zip(boundaries, boundaries[1:]):
+            if self.frame_mode:
+                fps = self.video_fps or 30.0
+                new_cuts.append(Cut(start_repr=round(start * fps), end_repr=round(end * fps), frame_mode=True))
+            else:
+                new_cuts.append(Cut(start_repr=self.keyframe_index_of(start),
+                                     end_repr=self.keyframe_index_of(end), frame_mode=False))
+        self.cuts = new_cuts
+        self.select_cut(0)
+        self.refresh_cut_list()
+        self.status.setText(f"Found {len(new_cuts)} scenes")
 
     def on_cut_list_selected(self, row):
         if row < 0 or not self.cuts:
