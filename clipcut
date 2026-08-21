@@ -15,6 +15,7 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -813,9 +815,18 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         sidebar.addWidget(self.progress_bar)
 
+        status_row = QHBoxLayout()
         self.status = QLabel("")
         self.status.setWordWrap(True)
-        sidebar.addWidget(self.status)
+        status_row.addWidget(self.status, stretch=1)
+
+        self.error_details_button = QPushButton("Details...")
+        self.error_details_button.clicked.connect(self.show_error_details)
+        self.error_details_button.setVisible(False)
+        status_row.addWidget(self.error_details_button)
+        sidebar.addLayout(status_row)
+
+        self.error_details = ""
 
         root.addWidget(sidebar_widget)
 
@@ -1260,11 +1271,13 @@ class MainWindow(QMainWindow):
             cmd, out_path, target_duration = self.build_command()
         except ValueError as e:
             self.status.setText(f"Invalid input: {e}")
+            self.error_details_button.setVisible(False)
             return
 
         self.pending_out_path = out_path
         self.progress_target_duration = target_duration
         self.progress_buffer = ""
+        self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -1278,11 +1291,29 @@ class MainWindow(QMainWindow):
         self.process.errorOccurred.connect(self.on_process_error)
         self.process.start(cmd[0], cmd[1:])
 
+    def report_error(self, summary, details):
+        self.status.setText(summary)
+        self.error_details = details
+        self.error_details_button.setVisible(bool(details))
+
+    def show_error_details(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Error Details")
+        dialog.resize(600, 400)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(self.error_details)
+        text.setReadOnly(True)
+        layout.addWidget(text)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+        dialog.exec()
+
     def on_process_error(self, _error):
         self.spinner_timer.stop()
         self.progress_bar.setVisible(False)
         self.process_button.setEnabled(True)
-        self.status.setText(f"Failed to launch ffmpeg: {self.process.errorString()}")
+        self.report_error("Failed to launch ffmpeg", self.process.errorString())
         self.process = None
 
     def on_process_finished(self, exit_code, _exit_status):
@@ -1293,12 +1324,13 @@ class MainWindow(QMainWindow):
         self.process = None
 
         if exit_code != 0:
-            self.status.setText(f"ffmpeg failed:\n{stderr[-500:]}")
+            self.report_error("ffmpeg failed", stderr)
             return
 
         out_path = self.pending_out_path
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
+        self.error_details_button.setVisible(False)
         self.status.setText("Saved successfully")
 
 
