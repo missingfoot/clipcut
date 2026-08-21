@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
@@ -194,6 +195,19 @@ class NumberLineEdit(QLineEdit):
         current = int(self.text() or self.placeholderText() or 0)
         self.setText(str(max(0, current + step * direction)))
         event.accept()
+
+
+@dataclass
+class Cut:
+    """One entry in the cut list. start_repr/end_repr are a keyframe index or a
+    frame number depending on frame_mode, matching how the Start/End fields
+    already represent time - see read_keyframe_fields_seconds/
+    read_frame_fields_seconds. end_repr=None means "through the end of the
+    file", the same blank-field convention the UI already uses."""
+    start_repr: int = 0
+    end_repr: int | None = None
+    frame_mode: bool = True
+    crop: tuple | None = None
 
 
 class GuideItem(QGraphicsRectItem):
@@ -1289,6 +1303,10 @@ class MainWindow(QMainWindow):
         sidebar.addLayout(file_button_row)
 
         self.frame_mode = True
+        self.cuts = []
+        self.active_cut = 0
+        self.shared_crop = (0, 0, 0, 0)
+        self.per_cut_crop_enabled = False
 
         def make_note(text):
             note = QLabel(text)
@@ -1625,6 +1643,9 @@ class MainWindow(QMainWindow):
         self.keyframe_times = get_keyframe_times(path)
         self.set_filename_label(path.name)
         self.browse_button.setText("Replace File...")
+        self.cuts = [Cut(frame_mode=self.frame_mode)]
+        self.active_cut = 0
+        self.shared_crop = (0, 0, 0, 0)
         self.start_keyframe_edit.clear()
         self.end_keyframe_edit.clear()
         for field in self.frame_edits:
@@ -1679,6 +1700,9 @@ class MainWindow(QMainWindow):
         self.duration = None
         self.video_fps = None
         self.keyframe_times = []
+        self.cuts = []
+        self.active_cut = 0
+        self.shared_crop = (0, 0, 0, 0)
         self.filename_label.setText("Drag and drop or choose a file")
         self.filename_label.setToolTip("")
         self.browse_button.setText("Browse...")
@@ -2042,6 +2066,48 @@ class MainWindow(QMainWindow):
             self.write_end_field(end)
             self._syncing = False
         self.update_suffix_placeholder()
+
+    def select_cut(self, index):
+        """Push cuts[index]'s data into the Start/End/mode widgets (and crop
+        widgets, if per-cut crop is on) - the single sync point used by both
+        UI selection and the export loop. Mirrors write_start_field/
+        write_end_field's blank-means-default convention: end_repr=None
+        writes a blank End field."""
+        cut = self.cuts[index]
+        self.active_cut = index
+        self._syncing = True
+        self.frame_mode = cut.frame_mode
+        self.cut_mode_frame.setChecked(cut.frame_mode)
+        self.cut_mode_keyframe.setChecked(not cut.frame_mode)
+        self.frame_start_widget.setVisible(cut.frame_mode)
+        self.frame_end_widget.setVisible(cut.frame_mode)
+        self.keyframe_start_widget.setVisible(not cut.frame_mode)
+        self.keyframe_end_widget.setVisible(not cut.frame_mode)
+        start_edit = self.start_frame_edit if cut.frame_mode else self.start_keyframe_edit
+        end_edit = self.end_frame_edit if cut.frame_mode else self.end_keyframe_edit
+        start_edit.setText(str(cut.start_repr) if cut.start_repr else "")
+        end_edit.setText(str(cut.end_repr) if cut.end_repr is not None else "")
+        if self.per_cut_crop_enabled:
+            crop = cut.crop if cut.crop is not None else self.shared_crop
+            for edit, value in zip(self.crop_edits, crop):
+                edit.setText(str(value) if value else "")
+            self.preview.set_crop_pixels(*crop)
+        self._syncing = False
+        self.update_crop_size_fields()
+        self.update_suffix_placeholder()
+
+    def trim_seconds_for_cut(self, cut):
+        """Resolve a Cut's start/end to seconds without touching any live widget -
+        the read-only counterpart to select_cut, used for list sorting (Task 2)
+        and timeline segments (Task 3)."""
+        if cut.frame_mode:
+            fps = self.video_fps or 30.0
+            start = cut.start_repr / fps
+            end = cut.end_repr / fps if cut.end_repr is not None else self.duration
+        else:
+            start = self.keyframe_time(cut.start_repr)
+            end = self.keyframe_time(cut.end_repr) if cut.end_repr is not None else self.duration
+        return start, end
 
     def on_trim_changed(self, start, end):
         if self._syncing:
