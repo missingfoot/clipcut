@@ -2591,16 +2591,16 @@ class MainWindow(QMainWindow):
             tmp_dir = Path(tempfile.mkdtemp(prefix="clipcut_"))
             queue = []
             crops = []
+            audio_only = self.audio_only.isChecked()
             for i, cut in enumerate(self.cuts):
                 self.select_cut(i)
-                ext = ".m4a" if self.audio_only.isChecked() else self.path.suffix
+                ext = ".m4a" if audio_only else self.path.suffix
                 tmp_path = tmp_dir / f"part_{i + 1}{ext}"
                 cmd, target_duration = self.build_ffmpeg_args(tmp_path)
                 queue.append((cmd, tmp_path, target_duration))
-                try:
-                    crops.append(self.get_crop()[:2] + self.get_crop()[2:4])
-                except ValueError:
-                    crops.append(None)
+                if not audio_only:
+                    crop_w, crop_h = self.get_crop()[2:4]
+                    crops.append((crop_w, crop_h))
             self.select_cut(saved_active)
         except ValueError as e:
             self.status.setText(f"Invalid input: {e}")
@@ -2608,9 +2608,15 @@ class MainWindow(QMainWindow):
             return
 
         self.combined_tmp_dir = tmp_dir
-        self.combined_uniform = len(set(crops)) <= 1 and (
-            len(self.cuts) == 1 or all(c.frame_mode == self.cuts[0].frame_mode for c in self.cuts))
-        self.combined_target_size = (max(c[2] for c in crops), max(c[3] for c in crops))
+        if audio_only:
+            self.combined_uniform = True
+            self.combined_target_size = (self.video_width, self.video_height)
+        else:
+            self.combined_uniform = len(set(crops)) <= 1 and (
+                len(self.cuts) == 1 or all(c.frame_mode == self.cuts[0].frame_mode for c in self.cuts))
+            target_w = max(c[0] for c in crops)
+            target_h = max(c[1] for c in crops)
+            self.combined_target_size = (target_w + target_w % 2, target_h + target_h % 2)
         self.export_queue = queue
         self.export_is_combined = True
         self.error_details_button.setVisible(False)
@@ -2618,7 +2624,7 @@ class MainWindow(QMainWindow):
         self.run_next_export()
 
     def run_concat(self):
-        parts = sorted(self.combined_tmp_dir.glob("part_*"))
+        parts = sorted(self.combined_tmp_dir.glob("part_*"), key=lambda p: int(p.stem.split("_")[1]))
         append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
         ext = ".m4a" if self.audio_only.isChecked() else self.path.suffix
         out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{ext}"))
