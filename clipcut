@@ -1678,6 +1678,8 @@ class MainWindow(QMainWindow):
         self.cuts = [Cut(frame_mode=self.frame_mode)]
         self.active_cut = 0
         self.shared_crop = (0, 0, 0, 0)
+        self.per_cut_crop_enabled = False
+        self.per_cut_crop_check.setChecked(False)
         self.refresh_cut_list()
         self.start_keyframe_edit.clear()
         self.end_keyframe_edit.clear()
