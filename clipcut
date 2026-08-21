@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
@@ -644,7 +644,6 @@ class MainWindow(QMainWindow):
         sidebar.setContentsMargins(12, 12, 12, 12)
 
         self.filename_label = QLabel("Drag and drop or choose a file")
-        self.filename_label.setWordWrap(True)
         sidebar.addWidget(self.filename_label)
 
         file_button_row = QHBoxLayout()
@@ -863,6 +862,12 @@ class MainWindow(QMainWindow):
         if filename:
             self.load_file(Path(filename))
 
+    def set_filename_label(self, name):
+        width = self.filename_label.width() or 250
+        elided = QFontMetrics(self.filename_label.font()).elidedText(name, Qt.ElideMiddle, width)
+        self.filename_label.setText(elided)
+        self.filename_label.setToolTip(name)
+
     def load_file(self, path):
         try:
             w, h, duration, fps = probe(path)
@@ -874,7 +879,7 @@ class MainWindow(QMainWindow):
         self.duration = duration
         self.video_fps = fps
         self.keyframe_times = get_keyframe_times(path)
-        self.filename_label.setText(f"{path.name}  ({w}x{h}, {duration:.1f}s)")
+        self.set_filename_label(path.name)
         self.browse_button.setText("Replace File...")
         self.start_keyframe_edit.clear()
         # Blank End means "use the range" everywhere else, so default it explicitly
@@ -908,6 +913,7 @@ class MainWindow(QMainWindow):
         self.video_fps = None
         self.keyframe_times = []
         self.filename_label.setText("Drag and drop or choose a file")
+        self.filename_label.setToolTip("")
         self.browse_button.setText("Browse...")
         for field in self.keyframe_edits:
             field.clear()
