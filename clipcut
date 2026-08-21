@@ -1295,7 +1295,7 @@ class MainWindow(QMainWindow):
         self.process_button.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        self.status.setText("Working...")
+        self.status.setText("")
 
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.on_process_output)
