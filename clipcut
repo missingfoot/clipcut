@@ -1585,6 +1585,17 @@ class MainWindow(QMainWindow):
         self.audio_only.toggled.connect(self.update_suffix_placeholder)
         self.update_suffix_placeholder()
 
+        self.export_mode_separate = QRadioButton("Separate files")
+        self.export_mode_combined = QRadioButton("Combined file")
+        self.export_mode_separate.setChecked(True)
+        self.export_mode_group = QButtonGroup(self)
+        self.export_mode_group.addButton(self.export_mode_separate)
+        self.export_mode_group.addButton(self.export_mode_combined)
+        export_mode_row = QHBoxLayout()
+        export_mode_row.addWidget(self.export_mode_separate)
+        export_mode_row.addWidget(self.export_mode_combined)
+        sidebar.addLayout(export_mode_row)
+
         button_row = QHBoxLayout()
         self.process_button = QPushButton("Process")
         self.process_button.clicked.connect(self.do_process)
@@ -2540,18 +2551,46 @@ class MainWindow(QMainWindow):
                 self.progress_percent = pct
 
     def do_process(self):
+        if self.export_mode_combined.isChecked() and len(self.cuts) > 1:
+            self.do_process_combined()
+            return
         try:
-            cmd, out_path, target_duration = self.build_command()
+            self.sync_active_cut_from_widgets()
+            saved_active = self.active_cut
+            append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
+            queue = []
+            for i, cut in enumerate(self.cuts):
+                self.select_cut(i)
+                if self.audio_only.isChecked():
+                    ext = ".m4a"
+                else:
+                    ext = self.path.suffix
+                suffix = f"{append_text}_{i + 1}" if len(self.cuts) > 1 else append_text
+                out_path = next_available(self.path.with_name(f"{self.path.stem}_{suffix}{ext}"))
+                cmd, target_duration = self.build_ffmpeg_args(out_path)
+                queue.append((cmd, out_path, target_duration))
+            self.select_cut(saved_active)
         except ValueError as e:
             self.status.setText(f"Invalid input: {e}")
             self.error_details_button.setVisible(False)
             return
 
+        self.export_queue = queue
+        self.export_total = len(queue)
+        self.error_details_button.setVisible(False)
+        self.process_button.setEnabled(False)
+        self.run_next_export()
+
+    def run_next_export(self):
+        if not self.export_queue:
+            self.spinner_timer.stop()
+            self.process_button.setEnabled(True)
+            self.status.setText("Saved successfully")
+            return
+        cmd, out_path, target_duration = self.export_queue.pop(0)
         self.pending_out_path = out_path
         self.progress_target_duration = target_duration
         self.progress_buffer = ""
-        self.error_details_button.setVisible(False)
-        self.process_button.setEnabled(False)
         self.progress_percent = 0
         self.spinner_index = 0
         self.advance_spinner()
@@ -2589,19 +2628,20 @@ class MainWindow(QMainWindow):
 
     def on_process_finished(self, exit_code, _exit_status):
         self.spinner_timer.stop()
-        self.process_button.setEnabled(True)
         stderr = bytes(self.process.readAllStandardError()).decode(errors="replace")
         self.process = None
 
         if exit_code != 0:
+            self.process_button.setEnabled(True)
             self.report_error("ffmpeg failed", stderr)
+            self.export_queue = []
             return
 
         out_path = self.pending_out_path
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
         self.error_details_button.setVisible(False)
-        self.status.setText("Saved successfully")
+        self.run_next_export()
 
 
 def main():
