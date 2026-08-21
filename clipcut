@@ -189,10 +189,11 @@ class GuideItem(QGraphicsRectItem):
     ACTIVE_COLOR = QColor(255, 0, 255)
     INACTIVE_COLOR = QColor(255, 255, 255, 60)
 
-    def __init__(self, orientation, on_drag):
+    def __init__(self, orientation, on_drag, on_double_click):
         super().__init__()
         self.orientation = orientation  # 'h' (drags vertically) or 'v' (drags horizontally)
         self.on_drag = on_drag
+        self.on_double_click = on_double_click
         self.setCursor(Qt.SizeVerCursor if orientation == "h" else Qt.SizeHorCursor)
         self.setPen(Qt.NoPen)
         self.setBrush(Qt.NoBrush)
@@ -221,6 +222,11 @@ class GuideItem(QGraphicsRectItem):
 
     def mouseReleaseEvent(self, _event):
         self._dragging = False
+
+    def mouseDoubleClickEvent(self, event):
+        self._dragging = False
+        self.on_double_click()
+        event.accept()
 
 
 class VideoPreview(QGraphicsView):
@@ -271,10 +277,14 @@ class VideoPreview(QGraphicsView):
         self.hint_item = self.gscene.addSimpleText("Drop video here")
         self.hint_item.setBrush(QColor("#999999"))
 
-        self.guide_top = GuideItem("h", lambda y: self._guide_dragged("top", y))
-        self.guide_bottom = GuideItem("h", lambda y: self._guide_dragged("bottom", y))
-        self.guide_left = GuideItem("v", lambda x: self._guide_dragged("left", x))
-        self.guide_right = GuideItem("v", lambda x: self._guide_dragged("right", x))
+        self.guide_top = GuideItem("h", lambda y: self._guide_dragged("top", y),
+                                    lambda: self._guide_reset("top"))
+        self.guide_bottom = GuideItem("h", lambda y: self._guide_dragged("bottom", y),
+                                       lambda: self._guide_reset("bottom"))
+        self.guide_left = GuideItem("v", lambda x: self._guide_dragged("left", x),
+                                     lambda: self._guide_reset("left"))
+        self.guide_right = GuideItem("v", lambda x: self._guide_dragged("right", x),
+                                      lambda: self._guide_reset("right"))
         for g in (self.guide_top, self.guide_bottom, self.guide_left, self.guide_right):
             self.gscene.addItem(g)
             g.hide()
@@ -421,6 +431,20 @@ class VideoPreview(QGraphicsView):
             top = max(0, min(self.video_height - 1, int((pos - rect.top()) / sy)))
         elif which == "bottom":
             bottom = max(0, min(self.video_height - 1, int((rect.bottom() - pos) / sy)))
+        self.crop = (left, top, right, bottom)
+        self.refresh_overlay()
+        self.guides_changed.emit(left, top, right, bottom)
+
+    def _guide_reset(self, which):
+        left, top, right, bottom = self.crop
+        if which == "left":
+            left = 0
+        elif which == "right":
+            right = 0
+        elif which == "top":
+            top = 0
+        elif which == "bottom":
+            bottom = 0
         self.crop = (left, top, right, bottom)
         self.refresh_overlay()
         self.guides_changed.emit(left, top, right, bottom)
