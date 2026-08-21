@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - A freshly-loaded file always has exactly one `Cut` and `per_cut_crop_enabled = False` — the N=1 case must look and behave identically to today's single-cut app. Never break this.
-- No automated test suite exists; do not introduce a new test framework. Verify with offscreen scripts (`os.environ["QT_QPA_PLATFORM"] = "offscreen"`, load the real `clipcut` module via `importlib.machinery.SourceFileLoader`, drive `MainWindow` methods directly) matching the pattern used throughout this project's history — see any `/tmp/claude-*/scratchpad/test_*.py` reasoning in prior commits' context if available, or just write fresh ones per task.
+- No automated test suite exists; do not introduce a new test framework. Verify with offscreen scripts run from the worktree root (`os.environ["QT_QPA_PLATFORM"] = "offscreen"`, load `./clipcut` via `importlib.machinery.SourceFileLoader` — a *relative* path, since the module under test is this worktree's edited copy, not the original repo's `clipcut` elsewhere on disk — then drive `MainWindow` methods directly). Every script that loads a video first ensures a shared fixture exists: `[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4` — this is not scratch cleaned up between tasks, so generate it once and every later task's script can assume it exists (the guard makes re-generating it a harmless no-op either way).
 - Keep the existing single-file layout (`clipcut`). Do not split into multiple modules.
 - Follow existing UI conventions exactly: `make_label_row()` for label+combo rows, `make_note()` for helper text, `make_separator()` for group dividers, `LABEL_ROW_WIDTH` for alignment, the `setEnabled(True/False)` pairing in `load_file`/`remove_file` for every new interactive widget, and the `_syncing` guard pattern for any field that both reads and writes state.
 - Every new destructive action (deleting the last-but-one cut is disallowed entirely; replacing the cut list via scene detection) must not silently discard user work — confirm first per the spec.
@@ -33,6 +33,7 @@
   - `MainWindow.shared_crop: tuple[int,int,int,int]` (default `(0,0,0,0)`)
   - `MainWindow.per_cut_crop_enabled: bool` (default `False`)
   - `MainWindow.select_cut(index: int) -> None` — pushes `cuts[index]` into the Start/End fields, the Frame/Keyframe radio, and (if `per_cut_crop_enabled`) the crop fields; sets `self.active_cut = index`. No-op crop push when `per_cut_crop_enabled` is `False` (crop widgets keep showing `shared_crop`, which nothing in this task changes yet).
+  - `MainWindow.trim_seconds_for_cut(cut: Cut) -> tuple[float, float]` — resolves a `Cut`'s `start_repr`/`end_repr` to `(start_seconds, end_seconds)` without touching any live widget. The one place this resolution happens - Task 2 (list sorting) and Task 3 (timeline segments) both consume it rather than each re-deriving it.
 
 - [ ] **Step 1: Add the `Cut` dataclass and import `dataclasses`**
 
@@ -62,7 +63,7 @@ cat > /tmp/test_cut_dataclass.py << 'EOF'
 import sys, os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 
 c = m.Cut()
 assert c.start_repr == 0 and c.end_repr is None and c.frame_mode is True and c.crop is None
@@ -139,6 +140,25 @@ Add near `on_cut_mode_changed`:
         self.update_suffix_placeholder()
 ```
 
+- [ ] **Step 5b: Implement `trim_seconds_for_cut`**
+
+Add right after `select_cut`:
+
+```python
+    def trim_seconds_for_cut(self, cut):
+        """Resolve a Cut's start/end to seconds without touching any live widget -
+        the read-only counterpart to select_cut, used for list sorting (Task 2)
+        and timeline segments (Task 3)."""
+        if cut.frame_mode:
+            fps = self.video_fps or 30.0
+            start = cut.start_repr / fps
+            end = cut.end_repr / fps if cut.end_repr is not None else self.duration
+        else:
+            start = self.keyframe_time(cut.start_repr)
+            end = self.keyframe_time(cut.end_repr) if cut.end_repr is not None else self.duration
+        return start, end
+```
+
 - [ ] **Step 6: Verify `select_cut` with an offscreen script**
 
 ```bash
@@ -146,12 +166,12 @@ cat > /tmp/test_select_cut.py << 'EOF'
 import sys, os, pathlib
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
 win = m.MainWindow()
-win.load_file(pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4"))
+win.load_file(pathlib.Path("/tmp/clipcut_fixture.mp4"))
 assert len(win.cuts) == 1
 assert win.active_cut == 0
 
@@ -166,10 +186,11 @@ assert win.active_cut == 0
 assert win.start_frame_edit.text() == ""
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_select_cut.py
 ```
 
-Expected: `OK` printed. (Reuse the existing `test.mp4` fixture already sitting in the session's scratchpad from prior manual testing; if it's gone, regenerate with `ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/test.mp4` and point the script at that path instead.)
+Expected: `OK` printed.
 
 - [ ] **Step 7: Manual check**
 
@@ -307,12 +328,12 @@ cat > /tmp/test_cut_list.py << 'EOF'
 import sys, os, pathlib
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
 win = m.MainWindow()
-win.load_file(pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4"))
+win.load_file(pathlib.Path("/tmp/clipcut_fixture.mp4"))
 assert win.cut_list.count() == 1
 assert not win.delete_cut_button.isEnabled()
 
@@ -331,6 +352,7 @@ win.delete_cut()
 assert len(win.cuts) == 1
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_cut_list.py
 ```
 
@@ -519,18 +541,19 @@ cat > /tmp/test_timeline_segments.py << 'EOF'
 import sys, os, pathlib
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
 win = m.MainWindow()
-win.load_file(pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4"))
+win.load_file(pathlib.Path("/tmp/clipcut_fixture.mp4"))
 win.cuts.append(m.Cut(start_repr=60, end_repr=90, frame_mode=True))
 win.refresh_timeline_cuts()
 assert len(win.scrubber.segments) == 2
 assert win.scrubber.segments[0][2] is True  # cut 0 still active
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_timeline_segments.py
 ```
 
@@ -598,7 +621,14 @@ Add both to `crop_tab_layout` (checkbox near the other checkboxes/lock toggle; r
         self.per_cut_crop_enabled = enabled
         self.reset_cut_crop_button.setEnabled(enabled)
         if self.path:
-            crop = self.current_crop_target()
+            # Read-only resolution, same as select_cut - toggling the checkbox only
+            # changes which crop is *displayed*; it must not itself seed an override
+            # onto the active cut the way an actual edit (current_crop_target) would.
+            if enabled:
+                cut = self.cuts[self.active_cut]
+                crop = cut.crop if cut.crop is not None else self.shared_crop
+            else:
+                crop = self.shared_crop
             self.preview.set_crop_pixels(*crop)
             self.update_crop_size_fields()
 
@@ -611,13 +641,25 @@ Add both to `crop_tab_layout` (checkbox near the other checkboxes/lock toggle; r
         self.update_crop_size_fields()
 ```
 
-Every place that currently mutates crop state as a side effect of a crop-field edit needs one added line calling `self.set_current_crop(left, top, right, bottom)` with the values it just applied via `self.preview.set_crop_pixels(...)`/`apply_scaled_crop(...)`. Find every such site with:
+There are two distinct families of crop-change site to patch - checked directly against the current file with `grep -n "self.preview.set_crop_pixels\|self.preview.apply_scaled_crop" clipcut` (run it yourself to confirm line numbers before editing; they may have shifted since this plan was written):
 
-```bash
-grep -n "self.preview.set_crop_pixels\|self.preview.apply_scaled_crop" clipcut
-```
+**Family A - explicit `set_crop_pixels`/`apply_scaled_crop` call sites.** These already have `left, top, right, bottom` as local variables right where they call into `VideoPreview`: inside `recenter_crop`, `on_crop_size_field_edited` (two call sites, one per branch), `on_crop_position_field_edited`, `clear_crop`, and `on_aspect_ratio_selected`. Add `self.set_current_crop(left, top, right, bottom)` immediately after each of these six calls, using whatever those four values are already named at that exact call site.
 
-For each call site inside `MainWindow` (not inside `VideoPreview` itself - those are internal to the widget and don't need this), add `self.set_current_crop(left, top, right, bottom)` immediately after, using whatever the four values are already named in that function (they're already local variables at every such call site: `on_crop_field_edited`, `on_crop_size_field_edited`, `on_crop_position_field_edited`, `clear_crop`, `recenter_crop`, `on_aspect_ratio_selected`, `on_guides_changed`).
+**Family B - the two sync paths that do *not* call `set_crop_pixels`/`apply_scaled_crop` at all, and are easy to miss:**
+
+- `on_crop_field_edited` (single L/T/R/B field typed) calls `self.preview.set_edge(which, new_value)`, which mutates `VideoPreview.crop` *internally* and returns the result - it never calls `set_crop_pixels`. Add the sync call right after that line:
+  ```python
+              left, top, right, bottom, locked = self.preview.set_edge(which, new_value)
+              self.set_current_crop(left, top, right, bottom)
+  ```
+- `on_guides_changed(self, left, top, right, bottom, preserves_ratio)` is the single handler for *every* mouse-driven crop change - guide drag, corner drag, panning the crop interior, and double-click reset all mutate `VideoPreview.crop` internally and reach `MainWindow` only through this one signal. It already receives `left, top, right, bottom` as parameters. Add the sync call as the very first line of the method body, before the existing `if not preserves_ratio:` line:
+  ```python
+      def on_guides_changed(self, left, top, right, bottom, preserves_ratio):
+          self.set_current_crop(left, top, right, bottom)
+          if not preserves_ratio:
+  ```
+
+Missing Family B means every mouse-driven crop edit and every single-field edit would silently fail to persist into the active cut/shared crop - confirm both of these two sites are patched before moving to Step 4's verification.
 
 - [ ] **Step 3: Update `select_cut` to seed/apply crop consistently**
 
@@ -637,34 +679,46 @@ cat > /tmp/test_per_cut_crop.py << 'EOF'
 import sys, os, pathlib
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
 win = m.MainWindow()
-win.load_file(pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4"))
+win.load_file(pathlib.Path("/tmp/clipcut_fixture.mp4"))
 win.per_cut_crop_check.setChecked(True)
 assert win.per_cut_crop_enabled is True
 
+# Family A: an explicit set_crop_pixels call site (on_crop_field_edited -> set_edge
+# is Family B, exercised separately below).
 win.add_cut()
-win.crop_left_edit_placeholder = None  # not a real widget; using preview directly below
-win.preview.set_crop_pixels(50, 0, 0, 0)
-win.set_current_crop(50, 0, 0, 0)
-assert win.cuts[1].crop == (50, 0, 0, 0)
+win.select_cut(1)
+win.crop_left.setText("50")
+assert win.cuts[1].crop == (50, 0, 0, 0), win.cuts[1].crop
 
 win.select_cut(0)
 assert win.cuts[0].crop is None  # cut 0 never edited, still None
 
-win.reset_cut_crop()  # resets whichever is active (cut 0, already None - no-op)
+# Family B: mouse-driven crop changes only reach MainWindow through the
+# guides_changed signal -> on_guides_changed. Simulate that directly, since
+# driving a real mouse drag isn't practical offscreen.
 win.select_cut(1)
+win.on_guides_changed(10, 20, 30, 40, True)
+assert win.cuts[1].crop == (10, 20, 30, 40), win.cuts[1].crop
+
 win.reset_cut_crop()
 assert win.cuts[1].crop == win.shared_crop
+
+win.per_cut_crop_check.setChecked(False)
+win.crop_left.setText("99")
+assert win.shared_crop == (99, 0, 0, 0), win.shared_crop
+assert win.cuts[1].crop == (0, 0, 0, 0)  # untouched while the toggle is off
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_per_cut_crop.py
 ```
 
-Expected: `OK` printed. (The `crop_left_edit_placeholder` line is a harmless no-op left in deliberately to show the script doesn't depend on exact crop-field widget names - remove it if it's confusing; it does nothing.)
+Expected: `OK` printed.
 
 - [ ] **Step 5: Manual check**
 
@@ -697,12 +751,12 @@ cat > /tmp/test_build_command_before.py << 'EOF'
 import sys, os, pathlib
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
 win = m.MainWindow()
-win.load_file(pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4"))
+win.load_file(pathlib.Path("/tmp/clipcut_fixture.mp4"))
 win.write_start_field(1.0)
 win.write_end_field(3.0)
 cmd, out_path, duration = win.build_command()
@@ -710,10 +764,11 @@ print("CMD:", cmd)
 print("OUT:", out_path)
 print("DUR:", duration)
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_build_command_before.py
 ```
 
-Record the exact printed `CMD`/`OUT`/`DUR` output somewhere (paste it into a scratch note) - Step 4 re-runs this same script after the refactor and must print an identical `CMD` and `DUR` (the `OUT` path will differ run-to-run only if `next_available` finds an existing file from a prior run; delete any stray `test_1_cut.mp4`-style output file in the scratchpad between runs to keep it deterministic).
+Record the exact printed `CMD`/`OUT`/`DUR` output somewhere (paste it into a scratch note) - Step 4 re-runs this same script after the refactor and must print an identical `CMD` and `DUR` (the `OUT` path will differ run-to-run only if `next_available` finds an existing file from a prior run; delete any stray `clipcut_fixture_cut.mp4`-style output file next to the fixture between runs to keep it deterministic).
 
 - [ ] **Step 2: Refactor `build_command`**
 
@@ -796,6 +851,7 @@ Confirm `build_command` is still called the same way everywhere it was before (o
 - [ ] **Step 4: Re-run the baseline script and diff**
 
 ```bash
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_build_command_before.py
 ```
 
@@ -919,11 +975,11 @@ cat > /tmp/test_separate_export.py << 'EOF'
 import sys, os, pathlib, time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
-src = pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4")
+src = pathlib.Path("/tmp/clipcut_fixture.mp4")
 win = m.MainWindow()
 win.load_file(src)
 win.write_start_field(0.5)
@@ -947,6 +1003,7 @@ assert out2.exists(), f"missing {out2}"
 out1.unlink(); out2.unlink()
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_separate_export.py
 ```
 
@@ -1074,11 +1131,11 @@ cat > /tmp/test_combined_export.py << 'EOF'
 import sys, os, pathlib, time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
-src = pathlib.Path("/tmp/claude-1000/-home-james-Projects-clipcut/bd5394b0-7eb7-4b69-939a-f1c83f3e2d8b/scratchpad/test.mp4")
+src = pathlib.Path("/tmp/clipcut_fixture.mp4")
 win = m.MainWindow()
 win.load_file(src)
 win.export_mode_combined.setChecked(True)
@@ -1105,6 +1162,7 @@ assert 1.8 < dur < 2.2, f"unexpected combined duration {dur}"  # ~1s + ~1s of co
 out.unlink()
 print("OK")
 EOF
+[ -f /tmp/clipcut_fixture.mp4 ] || ffmpeg -y -f lavfi -i testsrc=size=640x360:rate=30:duration=5 -pix_fmt yuv420p /tmp/clipcut_fixture.mp4
 python3 /tmp/test_combined_export.py
 ```
 
@@ -1228,7 +1286,7 @@ cat > /tmp/test_scene_detect.py << 'EOF'
 import sys, os, pathlib, time
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader("clipcut_app", "/home/james/Projects/clipcut/clipcut").load_module()
+m = SourceFileLoader("clipcut_app", "./clipcut").load_module()
 from PySide6.QtWidgets import QApplication
 app = QApplication([])
 
