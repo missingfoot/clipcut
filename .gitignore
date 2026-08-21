@@ -2,3 +2,4 @@
 src/
 pkg/
 __pycache__/
+.superpowers/
