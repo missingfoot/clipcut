@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
-    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -171,6 +170,18 @@ def make_crop_group(label_text, edit):
     h.addWidget(QLabel(label_text))
     h.addWidget(edit)
     return group
+
+
+LABEL_ROW_WIDTH = 80  # fixed label width so a column of label+combo rows all line up
+
+
+def make_label_row(label_text, widget):
+    row = QHBoxLayout()
+    label = QLabel(label_text)
+    label.setFixedWidth(LABEL_ROW_WIDTH)
+    row.addWidget(label)
+    row.addWidget(widget, stretch=1)
+    return row
 
 
 class NumberLineEdit(QLineEdit):
@@ -361,7 +372,7 @@ class VideoPreview(QGraphicsView):
         # dropping it - only an explicit single-guide drag to 0 or a double-click reset
         # actually removes a guide.
         self.guide_active = {"left": False, "top": False, "right": False, "bottom": False}
-        # Width/height of the selected aspect-ratio preset, or None for "Free" - the
+        # Width/height of the selected aspect-ratio preset, or None for "None" - the
         # ratio a locked edit targets when one is set; otherwise a locked edit preserves
         # whatever ratio the box already has. See _effective_ratio and lock_aspect below.
         self.locked_ratio = None
@@ -441,6 +452,20 @@ class VideoPreview(QGraphicsView):
             c.setAcceptedMouseButtons(Qt.NoButton)
             self.gscene.addItem(c)
             c.hide()
+
+        self.show_thirds = False
+        self.thirds_v1 = QGraphicsRectItem()
+        self.thirds_v2 = QGraphicsRectItem()
+        self.thirds_h1 = QGraphicsRectItem()
+        self.thirds_h2 = QGraphicsRectItem()
+        self.thirds_lines = (self.thirds_v1, self.thirds_v2, self.thirds_h1, self.thirds_h2)
+        for t in self.thirds_lines:
+            t.setBrush(QColor(255, 255, 255, 90))
+            t.setPen(Qt.NoPen)
+            t.setZValue(6)
+            t.setAcceptedMouseButtons(Qt.NoButton)
+            self.gscene.addItem(t)
+            t.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -543,6 +568,8 @@ class VideoPreview(QGraphicsView):
             c.hide()
         self.center_h.hide()
         self.center_v.hide()
+        for th in self.thirds_lines:
+            th.hide()
         self.video_width = None
         self.video_height = None
         self.crop = (0, 0, 0, 0)
@@ -637,6 +664,10 @@ class VideoPreview(QGraphicsView):
         self.show_center = show
         self.refresh_overlay()
 
+    def set_show_thirds(self, show):
+        self.show_thirds = show
+        self.refresh_overlay()
+
     def set_black_preview(self, enabled):
         """"Black" crop style: solid opaque mask outside the crop with no guides, corner
         handles, or center cross drawn over it - a clean look at the actual result instead
@@ -729,11 +760,38 @@ class VideoPreview(QGraphicsView):
         self.center_h.setVisible(self.show_center and not self.black_preview)
         self.center_v.setVisible(self.show_center and not self.black_preview)
 
+        third_x1 = int(round(gx_left + (gx_right - gx_left) / 3))
+        third_x2 = int(round(gx_left + (gx_right - gx_left) * 2 / 3))
+        third_y1 = int(round(gy_top + (gy_bottom - gy_top) / 3))
+        third_y2 = int(round(gy_top + (gy_bottom - gy_top) * 2 / 3))
+        self.thirds_v1.setRect(third_x1, gy_top, t, max(0, gy_bottom - gy_top))
+        self.thirds_v2.setRect(third_x2, gy_top, t, max(0, gy_bottom - gy_top))
+        self.thirds_h1.setRect(gx_left, third_y1, max(0, gx_right - gx_left), t)
+        self.thirds_h2.setRect(gx_left, third_y2, max(0, gx_right - gx_left), t)
+        for th in self.thirds_lines:
+            th.setVisible(self.show_thirds and not self.black_preview)
+
+    def effective_ratio(self):
+        """The ratio the Size fields should target, for the current crop. Unlike
+        _effective_ratio, this skips the "all four guides engaged" gate: a Size edit
+        always sets both dimensions at once (directly, or via ratio-derivation), so it
+        can't suffer the single-guide ambiguity that gate exists for - it's a scale
+        operation like a corner drag, not a one-edge drag."""
+        if not self.lock_aspect:
+            return None
+        if self.locked_ratio:
+            return self.locked_ratio
+        left, top, right, bottom = self.crop
+        box_h = self.video_height - top - bottom
+        return (self.video_width - left - right) / box_h if box_h > 0 else None
+
     def _effective_ratio(self, box_w0, box_h0):
         """The ratio a locked edit should target, or None if edits should be free right
-        now: off when the Lock Aspect Ratio checkbox is off, a preset's ratio when one is
+        now: off when the Lock Aspect Ratio checkbox is off, when fewer than all four
+        guides are engaged yet (nothing meaningful to lock until a real box exists - a
+        single guide is just one edge, not a shape), a preset's ratio when one is
         selected, otherwise whatever ratio the box already has (or None if it's empty)."""
-        if not self.lock_aspect:
+        if not self.lock_aspect or not all(self.guide_active.values()):
             return None
         if self.locked_ratio:
             return self.locked_ratio
@@ -774,6 +832,20 @@ class VideoPreview(QGraphicsView):
             driven = max(0, min(self.video_height - 1, int(round(self.video_height - fixed - box_h))))
             return (left, driven, right, fixed) if which == "top" else (left, fixed, right, driven)
 
+    def _mark_active_sticky(self, left, top, right, bottom):
+        """Mark any newly-nonzero edge active without ever deactivating one just because
+        this particular edit pushed it to 0 - shared by every ratio-locked/scaled edit
+        (guide drags, field edits, double-click resets, corner and Size-field scaling)."""
+        for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
+            self.guide_active[name] = self.guide_active[name] or (val > 0)
+
+    def apply_scaled_crop(self, left, top, right, bottom):
+        """Commit a crop from a ratio-preserving scale (e.g. the Size fields acting as a
+        field version of the corner-drag scaler) with sticky guide activation."""
+        self._mark_active_sticky(left, top, right, bottom)
+        self.crop = (left, top, right, bottom)
+        self.refresh_overlay()
+
     def set_edge(self, which, new_value):
         """Set one crop edge from a typed field value, honoring the aspect-ratio lock the
         same way dragging that edge's guide would. Returns (left, top, right, bottom, locked)."""
@@ -785,8 +857,7 @@ class VideoPreview(QGraphicsView):
         ratio = self._effective_ratio(box_w0, box_h0)
         if ratio:
             left, top, right, bottom = self._resize_locked(which, new_value, left0, top0, right0, bottom0, ratio)
-            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
-                self.guide_active[name] = self.guide_active[name] or (val > 0)
+            self._mark_active_sticky(left, top, right, bottom)
         else:
             left, top, right, bottom = left0, top0, right0, bottom0
             if which == "left":
@@ -821,8 +892,7 @@ class VideoPreview(QGraphicsView):
         ratio = self._effective_ratio(box_w0, box_h0)
         if ratio:
             left, top, right, bottom = self._resize_locked(which, new_value, left0, top0, right0, bottom0, ratio)
-            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
-                self.guide_active[name] = self.guide_active[name] or (val > 0)
+            self._mark_active_sticky(left, top, right, bottom)
         else:
             left, top, right, bottom = self.crop
             if which == "left":
@@ -928,8 +998,7 @@ class VideoPreview(QGraphicsView):
             # Extend this edge to the frame boundary while preserving the ratio, instead
             # of the unlocked meaning of "remove this edge" (which would break it).
             left, top, right, bottom = self._resize_locked(which, 0, left0, top0, right0, bottom0, ratio)
-            for name, val in zip(("left", "top", "right", "bottom"), (left, top, right, bottom)):
-                self.guide_active[name] = self.guide_active[name] or (val > 0)
+            self._mark_active_sticky(left, top, right, bottom)
         else:
             left, top, right, bottom = left0, top0, right0, bottom0
             if which == "left":
@@ -999,7 +1068,9 @@ class Scrubber(QWidget):
 
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#2a2a2a"))
+        # Same background role a QLineEdit uses, so the timeline reads as a text-entry
+        # surface rather than an arbitrarily-picked dark gray.
+        painter.fillRect(self.rect(), self.palette().color(QPalette.Base))
         if self.duration > 0:
             x1 = self.x_for_time(self.trim_start)
             x2 = self.x_for_time(self.trim_end)
@@ -1016,6 +1087,11 @@ class Scrubber(QWidget):
                 painter.fillRect(x2, 0, 1, self.height(), box_color)
                 painter.fillRect(x1, 0, max(1, x2 - x1), 1, box_color)
                 painter.fillRect(x1, self.height() - 1, max(1, x2 - x1), 1, box_color)
+        # A single stroked rect, not four overlapping fillRects - overlapping semi-
+        # transparent fills would double up at the corners and look brighter there.
+        painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
         painter.end()
 
     def _handle_at(self, x):
@@ -1212,7 +1288,7 @@ class MainWindow(QMainWindow):
         file_button_row.addWidget(self.remove_file_button)
         sidebar.addLayout(file_button_row)
 
-        self.frame_mode = False
+        self.frame_mode = True
 
         def make_note(text):
             note = QLabel(text)
@@ -1240,54 +1316,45 @@ class MainWindow(QMainWindow):
         self.frame_end_widget = QWidget()
         self.frame_end_widget.setLayout(end_frame_row)
 
-        # A real QTabWidget (not a bare QTabBar) so the tabs read as attached to a
-        # bordered content box instead of floating on their own above the fields.
-        # QTabWidget defaults to an Expanding vertical size policy, which would
-        # otherwise stretch it (and, via its child layouts, the gaps between fields)
-        # to fill any leftover window height - constrain it to its natural size.
-        self.cut_mode_tabs = QTabWidget()
-        self.cut_mode_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.cut_mode_frame = QRadioButton("Frame")
+        self.cut_mode_keyframe = QRadioButton("Keyframe")
+        self.cut_mode_frame.setChecked(True)
+        self.cut_mode_group = QButtonGroup(self)
+        self.cut_mode_group.addButton(self.cut_mode_frame)
+        self.cut_mode_group.addButton(self.cut_mode_keyframe)
+        cut_mode_row = QVBoxLayout()
+        cut_mode_row.addWidget(self.cut_mode_frame)
+        cut_mode_row.addWidget(self.cut_mode_keyframe)
 
-        keyframe_page = QWidget()
-        keyframe_page_layout = QVBoxLayout(keyframe_page)
-        keyframe_page_layout.setContentsMargins(8, 8, 8, 8)
-        keyframe_page_layout.setSpacing(8)
-        keyframe_page_layout.addWidget(make_note("Lossless, snaps to nearest keyframe."))
-        keyframe_page_layout.addWidget(self.keyframe_start_widget)
-        keyframe_page_layout.addWidget(self.keyframe_end_widget)
-        keyframe_page_layout.addStretch()
-        self.cut_mode_tabs.addTab(keyframe_page, "Keyframe")
+        cut_note = make_note(
+            "Frame: precise, but needs re-encode (not fully lossless). "
+            "Keyframe: lossless, snaps to nearest keyframe.")
 
-        frame_page = QWidget()
-        frame_page_layout = QVBoxLayout(frame_page)
-        frame_page_layout.setContentsMargins(8, 8, 8, 8)
-        frame_page_layout.setSpacing(8)
-        frame_page_layout.addWidget(make_note("Precise, but needs re-encode (not fully lossless)."))
-        frame_page_layout.addWidget(self.frame_start_widget)
-        frame_page_layout.addWidget(self.frame_end_widget)
-        frame_page_layout.addStretch()
-        self.cut_mode_tabs.addTab(frame_page, "Frame")
-
-        self.cut_mode_tabs.currentChanged.connect(self.on_cut_mode_changed)
+        self.cut_mode_frame.toggled.connect(self.on_cut_mode_changed)
         self.frame_edits = (self.start_frame_edit, self.end_frame_edit)
 
         cut_tab_page = QWidget()
         cut_tab_layout = QVBoxLayout(cut_tab_page)
-        cut_tab_layout.setContentsMargins(0, 0, 0, 0)
-        cut_tab_layout.addWidget(self.cut_mode_tabs)
+        cut_tab_layout.setContentsMargins(8, 8, 8, 8)
+        cut_tab_layout.setSpacing(8)
+        cut_tab_layout.addWidget(cut_note)
+        cut_tab_layout.addLayout(cut_mode_row)
+        cut_tab_layout.addWidget(self.frame_start_widget)
+        cut_tab_layout.addWidget(self.frame_end_widget)
+        cut_tab_layout.addWidget(self.keyframe_start_widget)
+        cut_tab_layout.addWidget(self.keyframe_end_widget)
         cut_tab_layout.addStretch()
+        self.keyframe_start_widget.hide()
+        self.keyframe_end_widget.hide()
 
         # --- Crop tab (page 2) ---
         aspect_row = QVBoxLayout()
-        aspect_combo_row = QHBoxLayout()
-        aspect_combo_row.addWidget(QLabel("Aspect ratio"))
         self.aspect_combo = QComboBox()
-        self.aspect_combo.addItem("Free")
+        self.aspect_combo.addItem("None")
         for label in ("16:9", "4:3", "1:1", "21:9", "4:5"):
             self.aspect_combo.addItem(label)
         self.aspect_combo.setEnabled(False)
-        aspect_combo_row.addWidget(self.aspect_combo, stretch=1)
-        aspect_row.addLayout(aspect_combo_row)
+        aspect_row.addLayout(make_label_row("Preset", self.aspect_combo))
 
         orient_row = QHBoxLayout()
         self.orient_horizontal = QRadioButton("Horizontal")
@@ -1329,8 +1396,38 @@ class MainWindow(QMainWindow):
         crop_grid.setColumnStretch(0, 1)
         crop_grid.setColumnStretch(1, 1)
         crop_grid.setColumnStretch(2, 1)
-        self.crop_dims_label = make_note("")
+        self.crop_width_edit = NumberLineEdit()
+        self.crop_height_edit = NumberLineEdit()
+        for edit in (self.crop_width_edit, self.crop_height_edit):
+            edit.setMaximumWidth(60)
+            edit.setEnabled(False)
+        size_row = QHBoxLayout()
+        size_label = QLabel("Size")
+        size_label.setFixedWidth(LABEL_ROW_WIDTH)
+        size_row.addWidget(size_label)
+        size_row.addWidget(self.crop_width_edit)
+        size_row.addWidget(QLabel("×"))
+        size_row.addWidget(self.crop_height_edit)
+        size_row.addStretch()
+
+        self.crop_x_edit = NumberLineEdit()
+        self.crop_y_edit = NumberLineEdit()
+        for edit in (self.crop_x_edit, self.crop_y_edit):
+            edit.setMaximumWidth(60)
+            edit.setPlaceholderText("0")
+            edit.setEnabled(False)
+        position_row = QHBoxLayout()
+        position_label = QLabel("Position")
+        position_label.setFixedWidth(LABEL_ROW_WIDTH)
+        position_row.addWidget(position_label)
+        position_row.addWidget(self.crop_x_edit)
+        position_row.addWidget(QLabel(","))
+        position_row.addWidget(self.crop_y_edit)
+        position_row.addStretch()
         crop_note = make_note("Cropping requires re-encode (not fully lossless)")
+        self.recenter_crop_button = QPushButton("Recenter Crop")
+        self.recenter_crop_button.clicked.connect(self.recenter_crop)
+        self.recenter_crop_button.setEnabled(False)
         self.clear_crop_button = QPushButton("Clear Crop")
         self.clear_crop_button.clicked.connect(self.clear_crop)
         self.clear_crop_button.setEnabled(False)
@@ -1338,45 +1435,50 @@ class MainWindow(QMainWindow):
         self.show_center_check.toggled.connect(self.preview.set_show_center)
         self.show_center_check.setEnabled(False)
 
-        crop_style_row = QHBoxLayout()
-        crop_style_row.addWidget(QLabel("Crop style"))
+        self.show_thirds_check = QCheckBox("Show Rule of Thirds")
+        self.show_thirds_check.toggled.connect(self.preview.set_show_thirds)
+        self.show_thirds_check.setEnabled(False)
+
         self.crop_style_combo = QComboBox()
         self.crop_style_combo.addItems(("Default", "Preview"))
         self.crop_style_combo.currentIndexChanged.connect(
             lambda i: self.preview.set_black_preview(i == 1))
         self.crop_style_combo.setEnabled(False)
-        crop_style_row.addWidget(self.crop_style_combo, stretch=1)
+        crop_style_row = make_label_row("Crop style", self.crop_style_combo)
 
-        bg_color_row = QHBoxLayout()
-        bg_color_row.addWidget(QLabel("Background"))
         self.bg_color_combo = QComboBox()
         self.bg_color_combo.addItems([name for name, _ in BG_COLOR_CHOICES])
         self.bg_color_combo.currentIndexChanged.connect(
             lambda i: self.preview.set_bg_color(BG_COLOR_CHOICES[i][1]))
         self.bg_color_combo.setEnabled(False)
-        bg_color_row.addWidget(self.bg_color_combo, stretch=1)
+        bg_color_row = make_label_row("Background", self.bg_color_combo)
 
-        line_color_row = QHBoxLayout()
-        line_color_row.addWidget(QLabel("Crop lines"))
         self.line_color_combo = QComboBox()
         self.line_color_combo.addItems([name for name, _ in LINE_COLOR_CHOICES])
         self.line_color_combo.currentIndexChanged.connect(
             lambda i: self.preview.set_line_color(LINE_COLOR_CHOICES[i][1]))
         self.line_color_combo.setEnabled(False)
-        line_color_row.addWidget(self.line_color_combo, stretch=1)
+        line_color_row = make_label_row("Crop lines", self.line_color_combo)
 
         crop_tab_page = QWidget()
         crop_tab_layout = QVBoxLayout(crop_tab_page)
         crop_tab_layout.setContentsMargins(8, 8, 8, 8)
         crop_tab_layout.setSpacing(8)
+        crop_tab_layout.addWidget(crop_note)
         crop_tab_layout.addLayout(aspect_row)
         crop_tab_layout.addLayout(crop_grid)
+        crop_tab_layout.addWidget(make_separator())
+        crop_tab_layout.addLayout(size_row)
+        crop_tab_layout.addLayout(position_row)
+        crop_tab_layout.addWidget(make_separator())
+        crop_tab_layout.addWidget(self.show_center_check)
+        crop_tab_layout.addWidget(self.show_thirds_check)
+        crop_tab_layout.addWidget(make_separator())
         crop_tab_layout.addLayout(crop_style_row)
         crop_tab_layout.addLayout(bg_color_row)
         crop_tab_layout.addLayout(line_color_row)
-        crop_tab_layout.addWidget(self.show_center_check)
-        crop_tab_layout.addWidget(self.crop_dims_label)
-        crop_tab_layout.addWidget(crop_note)
+        crop_tab_layout.addWidget(make_separator())
+        crop_tab_layout.addWidget(self.recenter_crop_button)
         crop_tab_layout.addWidget(self.clear_crop_button)
         crop_tab_layout.addStretch()
 
@@ -1423,6 +1525,10 @@ class MainWindow(QMainWindow):
             widget.textChanged.connect(self.on_frame_fields_changed)
         for which, widget in zip(("left", "top", "right", "bottom"), self.crop_edits):
             widget.textChanged.connect(lambda _text, w=which: self.on_crop_field_edited(w))
+        self.crop_width_edit.textChanged.connect(lambda: self.on_crop_size_field_edited("width"))
+        self.crop_height_edit.textChanged.connect(lambda: self.on_crop_size_field_edited("height"))
+        self.crop_x_edit.textChanged.connect(lambda: self.on_crop_position_field_edited("x"))
+        self.crop_y_edit.textChanged.connect(lambda: self.on_crop_position_field_edited("y"))
         self.aspect_combo.activated.connect(self.on_aspect_ratio_selected)
         self.orient_horizontal.toggled.connect(self.on_aspect_ratio_selected)
         self.remove_audio.toggled.connect(self.update_suffix_placeholder)
@@ -1525,13 +1631,25 @@ class MainWindow(QMainWindow):
             field.clear()
         for field in self.crop_edits:
             field.clear()
+        self.crop_width_edit.clear()
+        self.crop_height_edit.clear()
+        self.crop_x_edit.clear()
+        self.crop_y_edit.clear()
         self.aspect_combo.setCurrentIndex(0)
         self.aspect_combo.setEnabled(True)
         self.orient_horizontal.setChecked(True)
         self.orient_horizontal.setEnabled(True)
         self.orient_vertical.setEnabled(True)
+        self.recenter_crop_button.setEnabled(True)
+        self.crop_width_edit.setEnabled(True)
+        self.crop_height_edit.setEnabled(True)
+        self.crop_width_edit.setPlaceholderText(str(w))
+        self.crop_height_edit.setPlaceholderText(str(h))
+        self.crop_x_edit.setEnabled(True)
+        self.crop_y_edit.setEnabled(True)
         self.clear_crop_button.setEnabled(True)
         self.show_center_check.setEnabled(True)
+        self.show_thirds_check.setEnabled(True)
         self.lock_aspect_check.setEnabled(True)
         self.crop_style_combo.setEnabled(True)
         self.bg_color_combo.setEnabled(True)
@@ -1551,7 +1669,7 @@ class MainWindow(QMainWindow):
 
         self.preview.load(path, w, h)
         self.scrubber.set_duration(duration)
-        self.scrubber.set_keyframes(self.keyframe_times)
+        self.scrubber.set_keyframes([] if self.frame_mode else self.keyframe_times)
         self.time_label.setText(f"0:00 / {format_time(duration)}")
 
     def remove_file(self):
@@ -1572,13 +1690,25 @@ class MainWindow(QMainWindow):
             field.clear()
         for field in self.crop_edits:
             field.clear()
+        self.crop_width_edit.clear()
+        self.crop_height_edit.clear()
+        self.crop_x_edit.clear()
+        self.crop_y_edit.clear()
+        self.crop_width_edit.setEnabled(False)
+        self.crop_height_edit.setEnabled(False)
+        self.crop_width_edit.setPlaceholderText("")
+        self.crop_height_edit.setPlaceholderText("")
+        self.crop_x_edit.setEnabled(False)
+        self.crop_y_edit.setEnabled(False)
         self.aspect_combo.setCurrentIndex(0)
         self.aspect_combo.setEnabled(False)
         self.orient_horizontal.setChecked(True)
         self.orient_horizontal.setEnabled(False)
         self.orient_vertical.setEnabled(False)
+        self.recenter_crop_button.setEnabled(False)
         self.clear_crop_button.setEnabled(False)
         self.show_center_check.setEnabled(False)
+        self.show_thirds_check.setEnabled(False)
         self.lock_aspect_check.setEnabled(False)
         self.crop_style_combo.setEnabled(False)
         self.bg_color_combo.setEnabled(False)
@@ -1603,6 +1733,117 @@ class MainWindow(QMainWindow):
 
     # --- video preview <-> crop field sync ---
 
+    def recenter_crop(self):
+        """Keep the crop box's current size, just re-center it on the frame."""
+        if not self.path:
+            return
+        left, top, right, bottom = self.preview.crop
+        box_w = self.video_width - left - right
+        box_h = self.video_height - top - bottom
+        if box_w <= 0 or box_h <= 0:
+            return
+        new_left = (self.video_width - box_w) // 2
+        new_right = self.video_width - box_w - new_left
+        new_top = (self.video_height - box_h) // 2
+        new_bottom = self.video_height - box_h - new_top
+        self._syncing = True
+        for edit, value in zip(self.crop_edits, (new_left, new_top, new_right, new_bottom)):
+            edit.setText(str(value))
+        self._syncing = False
+        self.preview.set_crop_pixels(new_left, new_top, new_right, new_bottom)
+        self.update_crop_size_fields()
+
+    def on_crop_size_field_edited(self, which):
+        """Typing an exact pixel width/height overrides the crop directly, acting like a
+        corner-scale: when Lock Aspect Ratio is on (and a real box already exists), the
+        edited dimension drives the other one via the current ratio, same as dragging a
+        corner would. Unlocked, both are independent and this breaks any active preset."""
+        if self._syncing or not self.path:
+            return
+        self._syncing = True
+        try:
+            w_text = self.crop_width_edit.text()
+            h_text = self.crop_height_edit.text()
+            ratio = self.preview.effective_ratio()
+            if ratio and which == "width" and w_text:
+                target_w = int(w_text)
+                target_h = target_w / ratio
+            elif ratio and which == "height" and h_text:
+                target_h = int(h_text)
+                target_w = target_h * ratio
+            else:
+                target_w = int(w_text) if w_text else self.video_width
+                target_h = int(h_text) if h_text else self.video_height
+            if target_w <= 0 or target_h <= 0:
+                raise ValueError("size must be positive")
+            # Cap both dimensions together so a target that would overflow the frame on
+            # one axis scales the whole box back instead of just clamping that axis and
+            # breaking the ratio.
+            over = max(target_w / self.video_width, target_h / self.video_height)
+            if over > 1:
+                target_w /= over
+                target_h /= over
+            target_w = int(round(target_w))
+            target_h = int(round(target_h))
+
+            left0, top0, right0, bottom0 = self.preview.crop
+            center_x = (left0 + (self.video_width - right0)) / 2
+            center_y = (top0 + (self.video_height - bottom0)) / 2
+            # Derive the opposite edge from the total instead of rounding both edges
+            # independently - two separate round()s of complementary .5 values can both
+            # round the same way (Python's banker's rounding), leaving them short of the
+            # target width/height entirely instead of off by a pixel.
+            left = max(0, min(self.video_width - 1, int(round(center_x - target_w / 2))))
+            right = max(0, min(self.video_width - 1, self.video_width - target_w - left))
+            top = max(0, min(self.video_height - 1, int(round(center_y - target_h / 2))))
+            bottom = max(0, min(self.video_height - 1, self.video_height - target_h - top))
+            for edit, value in zip(self.crop_edits, (left, top, right, bottom)):
+                edit.setText(str(value))
+            if ratio:
+                self.crop_width_edit.setText(str(target_w))
+                self.crop_height_edit.setText(str(target_h))
+                self.preview.apply_scaled_crop(left, top, right, bottom)
+            else:
+                self.preview.set_crop_pixels(left, top, right, bottom)
+                self.break_aspect_lock()
+        except ValueError:
+            pass
+        finally:
+            self._syncing = False
+        self.update_crop_size_fields()
+        self.update_suffix_placeholder()
+
+    def on_crop_position_field_edited(self, which):
+        """Typing an exact X/Y moves the crop box - same translation dragging the crop
+        interior does, so it's ratio-agnostic (a move never changes the box's shape) and
+        always applies regardless of the aspect-ratio lock."""
+        if self._syncing or not self.path:
+            return
+        self._syncing = True
+        try:
+            left0, top0, right0, bottom0 = self.preview.crop
+            if which == "x":
+                box_w = self.video_width - left0 - right0
+                x_text = self.crop_x_edit.text()
+                new_x = max(0, min(self.video_width - box_w, int(x_text) if x_text else 0))
+                left, right = new_x, self.video_width - box_w - new_x
+                top, bottom = top0, bottom0
+            else:
+                box_h = self.video_height - top0 - bottom0
+                y_text = self.crop_y_edit.text()
+                new_y = max(0, min(self.video_height - box_h, int(y_text) if y_text else 0))
+                top, bottom = new_y, self.video_height - box_h - new_y
+                left, right = left0, right0
+            for edit, value in zip(self.crop_edits, (left, top, right, bottom)):
+                edit.setText(str(value))
+            self.preview.apply_scaled_crop(left, top, right, bottom)
+        except ValueError:
+            pass
+        finally:
+            self._syncing = False
+        self.update_crop_size_fields()
+        self.update_suffix_placeholder()
+
     def clear_crop(self):
         if not self.path:
             return
@@ -1612,11 +1853,11 @@ class MainWindow(QMainWindow):
         self._syncing = False
         self.preview.set_crop_pixels(0, 0, 0, 0)
         self.update_suffix_placeholder()
-        self.update_crop_dims_label()
+        self.update_crop_size_fields()
 
     def on_crop_field_edited(self, which):
         self.update_suffix_placeholder()
-        self.update_crop_dims_label()
+        self.update_crop_size_fields()
         if self._syncing or not self.path:
             return
         self._syncing = True
@@ -1635,13 +1876,13 @@ class MainWindow(QMainWindow):
             pass
         finally:
             self._syncing = False
-        self.update_crop_dims_label()
+        self.update_crop_size_fields()
 
     def current_target_ratio(self):
-        """The width/height ratio the aspect-ratio dropdown currently asks for, or None
-        for "Free". This doubles as the corner handles' lock: see VideoPreview.locked_ratio."""
+        """The width/height ratio the Preset dropdown currently asks for, or None
+        for "None". This doubles as the corner handles' lock: see VideoPreview.locked_ratio."""
         label = self.aspect_combo.currentText()
-        if label == "Free":
+        if label == "None":
             return None
         num, _, den = label.partition(":")
         ratio = int(num) / int(den)
@@ -1672,10 +1913,10 @@ class MainWindow(QMainWindow):
         self.preview.set_crop_pixels(left, top, right, bottom)
         self.preview.set_all_guides_active(ratio is not None)
         self.preview.set_locked_ratio(ratio)
-        self.update_crop_dims_label()
+        self.update_crop_size_fields()
 
     def break_aspect_lock(self):
-        """Drop the aspect-ratio dropdown back to Free. Called whenever an edit went
+        """Drop the Preset dropdown back to None. Called whenever an edit went
         through unlocked (Lock Aspect Ratio was off, or the box was empty), so a preset
         that no longer matches the actual box stops being displayed as selected."""
         if self.aspect_combo.currentIndex() != 0:
@@ -1694,21 +1935,31 @@ class MainWindow(QMainWindow):
         self.crop_bottom.setText(str(bottom))
         self._syncing = False
         self.update_suffix_placeholder()
-        self.update_crop_dims_label()
+        self.update_crop_size_fields()
 
-    def update_crop_dims_label(self):
+    def update_crop_size_fields(self):
+        """Keep the Size and Position fields showing the crop's current pixel dimensions
+        and top-left corner - blank (Size shows the source size as a placeholder,
+        Position shows 0,0) when there's no crop at all."""
         if not self.path:
-            self.crop_dims_label.setText("")
             return
         try:
-            _, _, crop_w, crop_h, has_crop = self.get_crop()
+            left, top, crop_w, crop_h, has_crop = self.get_crop()
         except ValueError:
-            self.crop_dims_label.setText("")
             return
+        was_syncing = self._syncing
+        self._syncing = True
         if has_crop:
-            self.crop_dims_label.setText(f"Cropped size: {crop_w} × {crop_h} px")
+            self.crop_width_edit.setText(str(crop_w))
+            self.crop_height_edit.setText(str(crop_h))
+            self.crop_x_edit.setText(str(left))
+            self.crop_y_edit.setText(str(top))
         else:
-            self.crop_dims_label.setText(f"Source size: {self.video_width} × {self.video_height} px")
+            self.crop_width_edit.clear()
+            self.crop_height_edit.clear()
+            self.crop_x_edit.clear()
+            self.crop_y_edit.clear()
+        self._syncing = was_syncing
 
     # --- trim fields <-> scrubber sync ---
 
@@ -1767,21 +2018,25 @@ class MainWindow(QMainWindow):
         else:
             self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
 
-    def on_cut_mode_changed(self, index):
-        checked = bool(index)  # tab 0 = Keyframe, tab 1 = Frame
-        self.frame_mode = checked
+    def on_cut_mode_changed(self, is_frame):
+        self.frame_mode = is_frame
+        self.scrubber.set_keyframes([] if is_frame else self.keyframe_times)
+        self.frame_start_widget.setVisible(is_frame)
+        self.frame_end_widget.setVisible(is_frame)
+        self.keyframe_start_widget.setVisible(not is_frame)
+        self.keyframe_end_widget.setVisible(not is_frame)
         if self.path:
             try:
-                # Read from the mode we're leaving (checked already reflects the new
-                # state by the time this handler fires, so get_trim_times() would read
-                # the wrong, not-yet-populated field set).
-                start, end = self.read_keyframe_fields_seconds() if checked else self.read_frame_fields_seconds()
+                # Read from the mode we're leaving (self.frame_mode already reflects the
+                # new mode by the time this handler fires, so get_trim_times() would
+                # read the wrong, not-yet-populated field set).
+                start, end = self.read_keyframe_fields_seconds() if is_frame else self.read_frame_fields_seconds()
             except ValueError:
                 start, end = 0.0, self.duration
-            # self.frame_mode already reflects the tab just switched to, so these target
-            # the right fields; blank stays blank rather than becoming a literal "0" or
-            # a concrete End number that (for Keyframe mode) could cap it to a keyframe
-            # well before the file's actual end.
+            # self.frame_mode already reflects the mode just switched to, so these
+            # target the right fields; blank stays blank rather than becoming a literal
+            # "0" or a concrete End number that (for Keyframe mode) could cap it to a
+            # keyframe well before the file's actual end.
             self._syncing = True
             self.write_start_field(start)
             self.write_end_field(end)
@@ -1904,6 +2159,8 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not checked)
 
     def read_frame_fields_seconds(self):
+        if self.duration is None:
+            raise ValueError("no file loaded")
         fps = self.video_fps or 30.0
         start_frame = int(self.start_frame_edit.text() or 0)
         if start_frame < 0:
