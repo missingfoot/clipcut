@@ -451,6 +451,7 @@ class VideoPreview(QGraphicsView):
             c.hide()
 
         self.black_preview = False
+        self.crop_overlay_visible = True  # whether exactly one cut is selected
         self.bg_color = QColor(0, 0, 0)
         self.shade_top = QGraphicsRectItem()
         self.shade_bottom = QGraphicsRectItem()
@@ -697,6 +698,16 @@ class VideoPreview(QGraphicsView):
         self.black_preview = enabled
         self.refresh_overlay()
 
+    def set_crop_overlay_visible(self, visible):
+        """Whether exactly one cut is currently selected. With none selected
+        (the playhead is in a gap between cuts, or every row was deselected) or
+        several selected at once, there's no single "current cut" to show a
+        crop for, so the whole overlay hides instead of showing stale/
+        ambiguous guides."""
+        if visible != self.crop_overlay_visible:
+            self.crop_overlay_visible = visible
+            self.refresh_overlay()
+
     def set_bg_color(self, color):
         self.bg_color = color
         self.refresh_overlay()
@@ -717,6 +728,11 @@ class VideoPreview(QGraphicsView):
 
         if not self.video_width or not self.video_height:
             return
+        # Whether to show any crop-overlay element at all: black_preview already
+        # hides guides/corners/center-thirds for its own "clean look" reason;
+        # crop_overlay_visible hides everything (including the shading) when
+        # there's no single selected cut to show a crop for.
+        overlay_visible = not self.black_preview and self.crop_overlay_visible
         left, top, right, bottom = self.crop
         sx = rect.width() / self.video_width
         sy = rect.height() / self.video_height
@@ -739,14 +755,14 @@ class VideoPreview(QGraphicsView):
         self.guide_top.set_active(self.guide_active["top"])
         self.guide_bottom.set_active(self.guide_active["bottom"])
         for g in (self.guide_left, self.guide_right, self.guide_top, self.guide_bottom):
-            g.setVisible(not self.black_preview)
+            g.setVisible(overlay_visible)
 
         h_active = self.guide_active["left"] and self.guide_active["right"]
         v_active = self.guide_active["top"] and self.guide_active["bottom"]
         self.crop_move.setRect(gx_left + t, gy_top + t,
                                 max(0, gx_right - gx_left - 2 * t), max(0, gy_bottom - gy_top - 2 * t))
         self.crop_move.set_axes(h_active, v_active)
-        if self.black_preview:
+        if not overlay_visible:
             self.crop_move.hide()
 
         all_active = h_active and v_active
@@ -759,13 +775,14 @@ class VideoPreview(QGraphicsView):
         }
         for corner, (cx, cy) in corner_pos.items():
             corner.setRect(cx - s / 2, cy - s / 2, s, s)
-            corner.setVisible(all_active and not self.black_preview)
+            corner.setVisible(all_active and overlay_visible)
 
         shade_alpha = 255 if self.black_preview else 140
         shade_color = QColor(self.bg_color)
         shade_color.setAlpha(shade_alpha)
         for s in (self.shade_top, self.shade_bottom, self.shade_left, self.shade_right):
             s.setBrush(shade_color)
+            s.setVisible(self.crop_overlay_visible)
         self.shade_left.setRect(0, 0, max(0, gx_left), full.height())
         self.shade_right.setRect(gx_right, 0, max(0, full.width() - gx_right), full.height())
         self.shade_top.setRect(0, 0, full.width(), max(0, gy_top))
@@ -778,8 +795,8 @@ class VideoPreview(QGraphicsView):
         mid_y = int(round((gy_top + gy_bottom) / 2))
         self.center_v.setRect(mid_x, gy_top, t, max(0, gy_bottom - gy_top))
         self.center_h.setRect(gx_left, mid_y, max(0, gx_right - gx_left), t)
-        self.center_h.setVisible(self.show_center and not self.black_preview)
-        self.center_v.setVisible(self.show_center and not self.black_preview)
+        self.center_h.setVisible(self.show_center and overlay_visible)
+        self.center_v.setVisible(self.show_center and overlay_visible)
 
         third_x1 = int(round(gx_left + (gx_right - gx_left) / 3))
         third_x2 = int(round(gx_left + (gx_right - gx_left) * 2 / 3))
@@ -790,7 +807,7 @@ class VideoPreview(QGraphicsView):
         self.thirds_h1.setRect(gx_left, third_y1, max(0, gx_right - gx_left), t)
         self.thirds_h2.setRect(gx_left, third_y2, max(0, gx_right - gx_left), t)
         for th in self.thirds_lines:
-            th.setVisible(self.show_thirds and not self.black_preview)
+            th.setVisible(self.show_thirds and overlay_visible)
 
     def effective_ratio(self):
         """The ratio the Size fields should target, for the current crop. Unlike
@@ -1437,6 +1454,7 @@ class MainWindow(QMainWindow):
         aspect_row = QVBoxLayout()
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItem("None")
+        self.aspect_combo.addItem("Current")
         for label in ("16:9", "4:3", "1:1", "21:9", "4:5"):
             self.aspect_combo.addItem(label)
         self.aspect_combo.setEnabled(False)
@@ -1522,9 +1540,6 @@ class MainWindow(QMainWindow):
         self.clear_crop_button = QPushButton("Clear Crop")
         self.clear_crop_button.clicked.connect(self.clear_crop)
         self.clear_crop_button.setEnabled(False)
-        self.reset_cut_crop_button = QPushButton("Reset to Shared Crop")
-        self.reset_cut_crop_button.clicked.connect(self.reset_cut_crop)
-        self.reset_cut_crop_button.setEnabled(False)
         self.show_center_check = QCheckBox("Show Center")
         self.show_center_check.toggled.connect(self.preview.set_show_center)
         self.show_center_check.setEnabled(False)
@@ -1574,7 +1589,6 @@ class MainWindow(QMainWindow):
         crop_tab_layout.addWidget(make_separator())
         crop_tab_layout.addWidget(self.recenter_crop_button)
         crop_tab_layout.addWidget(self.clear_crop_button)
-        crop_tab_layout.addWidget(self.reset_cut_crop_button)
         crop_tab_layout.addStretch()
 
         # --- Export tab (page 3): audio options + everything that used to live in
@@ -1650,7 +1664,7 @@ class MainWindow(QMainWindow):
         self.crop_x_edit.textChanged.connect(lambda: self.on_crop_position_field_edited("x"))
         self.crop_y_edit.textChanged.connect(lambda: self.on_crop_position_field_edited("y"))
         self.aspect_combo.activated.connect(self.on_aspect_ratio_selected)
-        self.orient_horizontal.toggled.connect(self.on_aspect_ratio_selected)
+        self.orient_horizontal.toggled.connect(self.on_orientation_changed)
         self.remove_audio.toggled.connect(self.update_suffix_placeholder)
         self.audio_only.toggled.connect(self.update_suffix_placeholder)
         self.update_suffix_placeholder()
@@ -1682,7 +1696,7 @@ class MainWindow(QMainWindow):
             self.aspect_combo, self.orient_horizontal, self.orient_vertical,
             self.recenter_crop_button, self.crop_width_edit, self.crop_height_edit,
             self.crop_x_edit, self.crop_y_edit, self.clear_crop_button,
-            self.per_cut_crop_check, self.reset_cut_crop_button,
+            self.per_cut_crop_check,
             self.show_center_check, self.show_thirds_check, self.lock_aspect_check,
             self.crop_style_combo, self.bg_color_combo, self.line_color_combo,
             self.process_button, self.play_button, self.step_back_button,
@@ -1995,13 +2009,72 @@ class MainWindow(QMainWindow):
         label = self.aspect_combo.currentText()
         if label == "None":
             return None
-        num, _, den = label.partition(":")
-        ratio = int(num) / int(den)
+        if label == "Current":
+            # The video's own native ratio - applying it always crops to
+            # (0,0,0,0) (nothing needs trimming, it already matches), but
+            # locks that ratio so a corner-resize scales down within the same
+            # shape without the user needing to know or pick 1:1 vs 16:9 etc.
+            if not self.video_width or not self.video_height:
+                return None
+            ratio = self.video_width / self.video_height
+        else:
+            num, _, den = label.partition(":")
+            ratio = int(num) / int(den)
         return 1 / ratio if self.orient_vertical.isChecked() else ratio
+
+    def match_aspect_preset(self, crop):
+        """Which Preset dropdown index (0 = "None") this crop tuple exactly
+        matches, given the current video size/orientation - keeps the dropdown
+        honestly reflecting whatever crop is actually on screen (per cut, once
+        Per-Cut Crop is on) instead of just remembering whichever preset was
+        picked last, possibly for a different cut entirely.
+
+        Treats crop == (0,0,0,0) as "None" even though some preset might
+        technically also compute an all-zero crop (e.g. a video whose native
+        ratio already matches "4:3") - a genuinely untouched cut ALSO displays
+        as (0,0,0,0), and there's no way to tell the two apart from the crop
+        value alone, so this stays on the side that doesn't silently engage an
+        aspect lock nobody asked for. on_aspect_ratio_selected() overrides
+        this explicitly for the one case that needs to win anyway: a preset
+        the user just deliberately picked, even one that happens to produce
+        an all-zero crop."""
+        if crop == (0, 0, 0, 0) or not self.video_width or not self.video_height:
+            return 0
+        vw, vh = self.video_width, self.video_height
+        for i in range(1, self.aspect_combo.count()):
+            label = self.aspect_combo.itemText(i)
+            if label == "Current":
+                continue  # not in "W:H" text form - always resolves to (0,0,0,0) anyway,
+                # already handled by the shortcut above
+            num, _, den = label.partition(":")
+            ratio = int(num) / int(den)
+            if self.orient_vertical.isChecked():
+                ratio = 1 / ratio
+            if vw / vh > ratio:
+                crop_w, crop_h = vw - round(vh * ratio), 0
+            else:
+                crop_w, crop_h = 0, vh - round(vw / ratio)
+            expected = (crop_w // 2, crop_h // 2, crop_w - crop_w // 2, crop_h - crop_h // 2)
+            if crop == expected:
+                return i
+        return 0
+
+    def on_orientation_changed(self, _checked):
+        """Horizontal/Vertical only changes how a *preset ratio* is interpreted
+        (current_target_ratio() flips it) - with no preset engaged ("None"),
+        orientation has nothing to reinterpret, so this must NOT fall through
+        to on_aspect_ratio_selected(), which would unconditionally recompute
+        the crop as (0,0,0,0) and destroy any freeform/manual crop in
+        progress. With a preset engaged, re-apply it under the new
+        orientation, same as picking it fresh from the dropdown."""
+        if not self.path or self.aspect_combo.currentText() == "None":
+            return
+        self.on_aspect_ratio_selected(self.aspect_combo.currentIndex())
 
     def on_aspect_ratio_selected(self, _index):
         if not self.path:
             return
+        chosen_index = self.aspect_combo.currentIndex()
         ratio = self.current_target_ratio()
         if ratio is None:
             left = top = right = bottom = 0
@@ -2015,18 +2088,19 @@ class MainWindow(QMainWindow):
                 crop_h = vh - round(vw / ratio)
             left, right = crop_w // 2, crop_w - crop_w // 2
             top, bottom = crop_h // 2, crop_h - crop_h // 2
-        # set_locked_ratio() before show_crop(): set_crop_pixels() (called inside
-        # show_crop) checks locked_ratio to decide whether all four guides should
-        # render as an engaged crop line, including ones landing on exactly 0 - it
-        # needs the new ratio in place before that check runs, not the old one.
-        self.preview.set_locked_ratio(ratio)
         # show_crop() blanks zero-valued edges (matching every other display path -
-        # select_cut, per-cut-crop toggle) instead of writing a literal "0", which
-        # used to make preset-applied zero edges look like they'd been "lost" the
-        # next time anything redisplayed this crop (e.g. toggling per-cut crop, or
-        # reselecting the cut) - it hadn't, the field text convention just differed.
+        # select_cut, per-cut-crop toggle) instead of writing a literal "0", and
+        # re-syncs the Preset dropdown + guide-lock from the crop itself.
         self.show_crop((left, top, right, bottom))
         self.set_current_crop(left, top, right, bottom)
+        if ratio is not None:
+            # show_crop()'s own reverse-inference (match_aspect_preset) treats an
+            # all-zero crop as "None" by default, to avoid falsely engaging a lock
+            # for cuts that were never touched - but this preset was just
+            # deliberately picked, so it must stick even when applying it produces
+            # a (0,0,0,0) crop (the video already matches this ratio exactly).
+            self.aspect_combo.setCurrentIndex(chosen_index)
+            self.preview.set_locked_ratio(ratio)
 
     def break_aspect_lock(self):
         """Drop the Preset dropdown back to None. Called whenever an edit went
@@ -2246,6 +2320,7 @@ class MainWindow(QMainWindow):
                 item.setSelected(True)
         self.cut_list.blockSignals(was_blocked)
         self.update_cut_selection_buttons()
+        self.preview.set_crop_overlay_visible(len(self.selected_cut_rows()) == 1)
         self.refresh_timeline_cuts()
         self.update_combined_export_availability()
 
@@ -2279,6 +2354,16 @@ class MainWindow(QMainWindow):
             self.export_mode_separate.setChecked(True)
 
     def sync_active_cut_from_widgets(self):
+        """Save the Start/End/mode fields into the active cut. Deliberately does
+        NOT touch cut.crop: this is called on nearly every interaction (editing
+        Start/End, adding a cut, switching selection, even just clicking
+        Process), including ones that never touched the crop fields at all - if
+        it captured crop_edits' current text too, every one of those unrelated
+        actions would silently stamp whatever crop happened to be on screen
+        (often just the shared_crop fallback display) onto the active cut as if
+        it were a deliberate per-cut override. Every real crop edit already
+        persists through set_current_crop() directly (on_crop_field_edited,
+        on_guides_changed, on_aspect_ratio_selected, clear_crop, etc.)."""
         if not self.cuts:
             return
         cut = self.cuts[self.active_cut]
@@ -2287,9 +2372,6 @@ class MainWindow(QMainWindow):
         end_edit = self.end_frame_edit if self.frame_mode else self.end_keyframe_edit
         cut.start_repr = int(start_edit.text()) if start_edit.text() else 0
         cut.end_repr = int(end_edit.text()) if end_edit.text() else None
-        if self.per_cut_crop_enabled:
-            texts = [e.text() for e in self.crop_edits]
-            cut.crop = tuple(int(t) if t else 0 for t in texts)
 
     def add_cut(self):
         if not self.path:
@@ -2454,6 +2536,9 @@ class MainWindow(QMainWindow):
             return
         rows = self.selected_cut_rows()
         self.update_cut_selection_buttons(rows)
+        # No selection, or more than one row, means there's no single "current
+        # cut" to show a crop for.
+        self.preview.set_crop_overlay_visible(len(rows) == 1)
         # A single selected row drives the Start/End/crop fields exactly like
         # before (multi-select has no one cut to edit, so the fields just keep
         # showing whatever was last active).
@@ -2495,14 +2580,23 @@ class MainWindow(QMainWindow):
         """Push a resolved (left, top, right, bottom) crop into the crop text
         fields, the preview overlay, and the Size/Position fields - the single
         sync point for *displaying* a crop (as opposed to editing one), shared by
-        select_cut, on_per_cut_crop_toggled, and reset_cut_crop. get_crop() reads
+        select_cut and on_per_cut_crop_toggled. get_crop() reads
         crop_edits as the source of truth, so any path that changes which crop is
-        on screen must go through here or the fields silently go stale."""
+        on screen must go through here or the fields silently go stale.
+
+        Also re-syncs the Preset dropdown to whatever this crop actually is,
+        rather than leaving it showing whichever preset was last picked -
+        possibly for a different cut entirely once Per-Cut Crop is on."""
         was_syncing = self._syncing
         self._syncing = True
         for edit, value in zip(self.crop_edits, crop):
             edit.setText(str(value) if value else "")
+        self.aspect_combo.setCurrentIndex(self.match_aspect_preset(crop))
         self._syncing = was_syncing
+        # set_locked_ratio() before set_crop_pixels(): the latter checks
+        # locked_ratio to decide whether all four guides render as an engaged
+        # crop line, including ones landing on exactly 0.
+        self.preview.set_locked_ratio(self.current_target_ratio())
         self.preview.set_crop_pixels(*crop)
         self.update_crop_size_fields()
 
@@ -2540,8 +2634,24 @@ class MainWindow(QMainWindow):
                 return
             for cut in self.cuts:
                 cut.crop = None
+        if enabled and self.shared_crop != (0, 0, 0, 0):
+            reply = QMessageBox.question(
+                self, "Turn On Per-Cut Crop?",
+                "Turning on Per-Cut Crop clears the current shared crop (cuts start "
+                "crop-less until you set one individually). Continue?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                self._syncing = True
+                self.per_cut_crop_check.setChecked(False)
+                self._syncing = False
+                return
+        if enabled:
+            # A cut with no override of its own falls back to shared_crop for
+            # display - clear it here so cuts you haven't touched yet show as
+            # crop-less, not as if they'd already inherited whatever generic
+            # crop was set before switching to per-cut mode.
+            self.shared_crop = (0, 0, 0, 0)
         self.per_cut_crop_enabled = enabled
-        self.reset_cut_crop_button.setEnabled(enabled)
         if self.path:
             # Read-only resolution, same as select_cut - toggling the checkbox only
             # changes which crop is *displayed*; it must not itself seed an override
@@ -2555,18 +2665,6 @@ class MainWindow(QMainWindow):
         # refresh_cut_list() also calls update_combined_export_availability() -
         # needed here too since toggling changes every row's crop-icon visibility
         # at once (the icon only shows while this checkbox is on).
-        self.refresh_cut_list()
-
-    def reset_cut_crop(self):
-        if not self.per_cut_crop_enabled or not self.cuts:
-            return
-        self.cuts[self.active_cut].crop = None
-        # Read-only resolution, not current_crop_target() - that helper re-seeds
-        # cut.crop = self.shared_crop on read, which would immediately undo the
-        # None we just set above.
-        self.show_crop(self.shared_crop)
-        # refresh_cut_list() also calls update_combined_export_availability() -
-        # needed here too so this cut's crop icon disappears immediately.
         self.refresh_cut_list()
 
     def trim_seconds_for_cut(self, cut):
@@ -2591,6 +2689,31 @@ class MainWindow(QMainWindow):
             start, end = self.trim_seconds_for_cut(cut)
             segments.append((start, end, i == self.active_cut))
         self.scrubber.set_cuts(segments)
+
+    def sync_selection_to_playhead(self):
+        """The Cut list's selection follows the playhead: if it's inside a
+        cut, that cut becomes the selected one (and its crop is what the
+        overlay shows, via on_cut_list_selection_changed/refresh_cut_list); if
+        it's in a gap (outside every cut), the list is deselected entirely and
+        the crop overlay hides - there's no "current cut" there to show one
+        for. Leaves active_cut and the Start/End fields alone when
+        deselecting, so they still show whatever was last being edited."""
+        if not self.cuts:
+            return
+        pos = self.current_position()
+        match = next((i for i, c in enumerate(self.cuts)
+                      if self.trim_seconds_for_cut(c)[0] <= pos <= self.trim_seconds_for_cut(c)[1]), None)
+        selected_rows = self.selected_cut_rows()
+        if match is None:
+            if selected_rows:
+                self.cut_list.clearSelection()
+        else:
+            already_selected = (len(selected_rows) == 1
+                                 and self.cut_list.item(selected_rows[0]).data(Qt.UserRole) == match)
+            if not already_selected:
+                self.sync_active_cut_from_widgets()
+                self.select_cut(match)
+                self.refresh_cut_list()
 
     def on_segment_clicked(self, index):
         """Handler for Scrubber.segment_clicked, which emits a raw index into
@@ -2707,6 +2830,7 @@ class MainWindow(QMainWindow):
         seconds = position_ms / 1000
         self.scrubber.set_position(seconds)
         self.time_label.setText(f"{format_time(seconds)} / {format_time(self.duration or 0)}")
+        self.sync_selection_to_playhead()
 
     def on_seek_requested(self, seconds):
         self.preview.player.setPosition(int(seconds * 1000))

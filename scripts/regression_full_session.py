@@ -196,18 +196,161 @@ def main():
     # --- Critical #2: per-cut crop toggle/edit/reset stay in sync with crop_edits,
     # the actual field get_crop() (and therefore every export) reads from ---
     win.select_cut(1)
+    win.shared_crop = (9, 9, 9, 9)  # simulate a generic crop set before going per-cut
+    orig_question = QMessageBox.question
+
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.No)
     win.per_cut_crop_check.setChecked(True)
     pump(20)
+    QMessageBox.question = orig_question
+    check("declining the turn-on confirmation leaves Per-Cut Crop off",
+          not win.per_cut_crop_check.isChecked() and not win.per_cut_crop_enabled)
+    check("...and leaves the pre-existing shared crop untouched",
+          win.shared_crop == (9, 9, 9, 9), str(win.shared_crop))
+
+    turn_on_question_calls = []
+    QMessageBox.question = staticmethod(
+        lambda *a, **kw: turn_on_question_calls.append(a) or QMessageBox.Yes)
+    win.per_cut_crop_check.setChecked(True)
+    pump(20)
+    QMessageBox.question = orig_question
+    check("turning per-cut crop on with a real shared crop to lose asks for confirmation",
+          bool(turn_on_question_calls))
+    check("accepting the turn-on confirmation clears the pre-existing generic (shared) crop",
+          win.shared_crop == (0, 0, 0, 0), str(win.shared_crop))
     check("toggling per-cut crop ON does not seed an override onto the active cut",
           win.cuts[1].crop is None, str(win.cuts[1].crop))
     check("toggling per-cut crop ON shows the resolved (shared) crop in the fields",
           all(e.text() == "" for e in win.crop_edits), str([e.text() for e in win.crop_edits]))
 
     for edit, value in zip(win.crop_edits, ("20", "10", "30", "15")):
-        edit.setText(value)
-    win.sync_active_cut_from_widgets()  # what nearly every real interaction triggers
+        edit.setText(value)  # fires on_crop_field_edited -> set_current_crop, the real path
     check("editing the crop fields writes the override onto the active cut",
           win.cuts[1].crop == (20, 10, 30, 15), str(win.cuts[1].crop))
+
+    # --- Switching Horizontal/Vertical must not destroy a freeform (non-
+    # preset) crop. orient_horizontal.toggled used to fire on_aspect_ratio_
+    # selected directly, which unconditionally recomputed the crop from
+    # current_target_ratio() - with no preset engaged ("None"), that means
+    # (0,0,0,0), wiping out whatever manual crop was in progress. ---
+    check("no preset is engaged for this freeform crop", win.aspect_combo.currentText() == "None")
+    win.orient_vertical.setChecked(True)
+    check("switching orientation with no preset engaged leaves a freeform crop untouched",
+          win.cuts[1].crop == (20, 10, 30, 15), str(win.cuts[1].crop))
+    win.orient_horizontal.setChecked(True)
+    check("switching back leaves it untouched too",
+          win.cuts[1].crop == (20, 10, 30, 15), str(win.cuts[1].crop))
+
+    # With a preset actually engaged, orientation SHOULD recompute the crop -
+    # that's the whole point of the toggle (re-crop for the flipped ratio).
+    sixteen_nine_index = win.aspect_combo.findText("16:9")
+    win.aspect_combo.setCurrentIndex(sixteen_nine_index)
+    win.on_aspect_ratio_selected(sixteen_nine_index)
+    horizontal_crop = win.cuts[1].crop
+    win.orient_vertical.setChecked(True)
+    check("switching orientation WITH a preset engaged recomputes the crop, doesn't just clear it",
+          win.cuts[1].crop is not None and win.cuts[1].crop != horizontal_crop,
+          f"{win.cuts[1].crop} vs horizontal={horizontal_crop}")
+    win.orient_horizontal.setChecked(True)  # restore for the rest of this section
+
+    # A preset whose ratio already matches the source video (fixture is
+    # 320x240 - exactly 4:3) computes an all-zero crop, since nothing needs
+    # trimming - that must still count as "4:3" selected, not bounce back to
+    # "None", or there's nothing engaged left for a follow-up orientation
+    # switch to recompute from.
+    four_three_index = win.aspect_combo.findText("4:3")
+    win.aspect_combo.setCurrentIndex(four_three_index)
+    win.on_aspect_ratio_selected(four_three_index)
+    check("a preset matching the video's native ratio produces an all-zero crop",
+          win.cuts[1].crop == (0, 0, 0, 0), str(win.cuts[1].crop))
+    check("...but stays selected as '4:3', not silently reverted to 'None'",
+          win.aspect_combo.currentText() == "4:3", win.aspect_combo.currentText())
+    win.orient_vertical.setChecked(True)
+    check("switching to Vertical right after recomputes a real crop from the still-engaged 4:3 preset",
+          win.cuts[1].crop is not None and win.cuts[1].crop != (0, 0, 0, 0),
+          str(win.cuts[1].crop))
+    check("...and the dropdown still reads '4:3' (just reinterpreted for portrait)",
+          win.aspect_combo.currentText() == "4:3", win.aspect_combo.currentText())
+    win.orient_horizontal.setChecked(True)  # restore for the rest of this section
+
+    # --- "Current" preset: the video's own native ratio, so a user can crop
+    # to the file's existing shape (and then scale/resize within it) without
+    # needing to know or pick whether it's 1:1, 16:9, 4:3, etc. Fixture is
+    # 320x240 (exactly 4:3), so applying it crops to (0,0,0,0) - nothing needs
+    # trimming, the video already matches its own ratio by definition. ---
+    current_index = win.aspect_combo.findText("Current")
+    win.aspect_combo.setCurrentIndex(current_index)
+    win.on_aspect_ratio_selected(current_index)
+    check("applying 'Current' crops to (0,0,0,0) - the video's own ratio needs no trimming",
+          win.cuts[1].crop == (0, 0, 0, 0), str(win.cuts[1].crop))
+    check("'Current' stays selected in the dropdown, not silently reverted to 'None'",
+          win.aspect_combo.currentText() == "Current", win.aspect_combo.currentText())
+
+    win.orient_vertical.setChecked(True)
+    check("switching to Vertical with 'Current' engaged crops to fit the video's ratio in portrait",
+          win.cuts[1].crop is not None and win.cuts[1].crop != (0, 0, 0, 0),
+          str(win.cuts[1].crop))
+    check("...and the dropdown still reads 'Current' after the flip",
+          win.aspect_combo.currentText() == "Current", win.aspect_combo.currentText())
+    win.orient_horizontal.setChecked(True)
+
+    check("'Current' is never reverse-matched onto an unrelated crop (match_aspect_preset skips it)",
+          win.match_aspect_preset((20, 10, 20, 10)) != current_index)
+
+    none_index = win.aspect_combo.findText("None")
+    win.aspect_combo.setCurrentIndex(none_index)
+    win.on_aspect_ratio_selected(none_index)
+    win.set_current_crop(20, 10, 30, 15)
+    win.select_cut(1)
+
+    # --- Crop must never leak onto a cut the user didn't touch. Previously,
+    # sync_active_cut_from_widgets() (called by nearly every interaction -
+    # editing Start/End, adding a cut, switching selection, clicking Process)
+    # also captured crop_edits' *currently displayed* text into the active
+    # cut's crop, even when the interaction had nothing to do with cropping -
+    # stamping whatever was on screen (often just the shared_crop fallback
+    # display) onto cuts as if it were a deliberate override. ---
+    win.select_cut(2)
+    check("switching to a cut with no override shows blank crop fields",
+          all(e.text() == "" for e in win.crop_edits), str([e.text() for e in win.crop_edits]))
+    win.write_start_field(0.6)
+    win.write_end_field(1.4)
+    check("editing Start/End on an untouched cut does NOT give it a crop",
+          win.cuts[2].crop is None, str(win.cuts[2].crop))
+
+    new_cut_index = len(win.cuts)
+    win.add_cut()
+    check("a newly-added cut starts with no crop", win.cuts[new_cut_index].crop is None,
+          str(win.cuts[new_cut_index].crop))
+    win.write_end_field(2.0)
+    check("editing a newly-added cut's End field does NOT give it a crop either",
+          win.cuts[new_cut_index].crop is None, str(win.cuts[new_cut_index].crop))
+    win.cuts.pop(new_cut_index)  # done with this scratch cut, remove it directly
+    win.select_cut(1)
+    win.refresh_cut_list()
+
+    # --- The Preset dropdown must reflect whichever cut is actually selected,
+    # not just remember whatever preset was last picked (possibly for a
+    # different cut, or before Per-Cut Crop was even on) ---
+    win.select_cut(1)  # crop (20,10,30,15) - not a preset shape
+    check("Preset dropdown shows 'None' for a cut whose crop doesn't match any preset",
+          win.aspect_combo.currentText() == "None", win.aspect_combo.currentText())
+    sixteen_nine_index = win.aspect_combo.findText("16:9")
+    win.aspect_combo.setCurrentIndex(sixteen_nine_index)
+    win.on_aspect_ratio_selected(sixteen_nine_index)
+    check("applying 16:9 to cut 1 selects it in the dropdown",
+          win.aspect_combo.currentText() == "16:9", win.aspect_combo.currentText())
+    win.select_cut(2)
+    check("switching to a cut with no crop resets the dropdown to 'None', not the last preset",
+          win.aspect_combo.currentText() == "None", win.aspect_combo.currentText())
+    win.select_cut(1)
+    check("switching back to the 16:9 cut restores that preset in the dropdown",
+          win.aspect_combo.currentText() == "16:9", win.aspect_combo.currentText())
+    none_index = win.aspect_combo.findText("None")
+    win.aspect_combo.setCurrentIndex(none_index)
+    win.on_aspect_ratio_selected(none_index)  # back to (20,10,30,15) baseline, no preset lock
+    win.set_current_crop(20, 10, 30, 15)
+    win.select_cut(1)
 
     # set_current_crop() is the real path a mouse-drag crop edit (or
     # on_crop_field_edited) goes through - the crop icon must appear the
@@ -286,19 +429,12 @@ def main():
           tuple(int(e.text() or 0) for e in win.crop_edits) == (20, 10, 30, 15),
           str([e.text() for e in win.crop_edits]))
 
-    win.reset_cut_crop()
-    check("Reset to Shared Crop clears the stored override",
-          win.cuts[1].crop in (None, (0, 0, 0, 0)), str(win.cuts[1].crop))
-    check("Reset to Shared Crop also clears the crop TEXT FIELDS (the actual export source)",
-          all(e.text() == "" for e in win.crop_edits), str([e.text() for e in win.crop_edits]))
-    win.sync_active_cut_from_widgets()  # simulate the very next interaction
-    check("...and the reset survives the next sync_active_cut_from_widgets() (doesn't resurrect the old override)",
-          win.cuts[1].crop in (None, (0, 0, 0, 0)), str(win.cuts[1].crop))
-
-    # Turning Per-Cut Crop OFF is now destructive - it clears every cut's crop
-    # override (not just the active one), guarded by a confirm dialog so it
-    # doesn't happen by accident. Declining leaves everything untouched;
-    # accepting actually clears and turns it off.
+    # The dedicated "Reset to Shared Crop" button was removed - clearing crops
+    # now happens solely via the Per-Cut Crop checkbox itself: turning it off
+    # is destructive, clearing every cut's crop override at once (not just
+    # the active one), guarded by a confirm dialog so it doesn't happen by
+    # accident. Declining leaves everything untouched; accepting actually
+    # clears and turns it off.
     win.cuts[1].crop = (7, 7, 7, 7)
     win.cuts[2].crop = (3, 3, 3, 3)
     win.select_cut(2)
@@ -405,6 +541,8 @@ def main():
     check("error_details_button stays in the sticky footer, outside the tab widget",
           not is_descendant_of(win.error_details_button, win.section_tabs))
     check("Done button was removed", not hasattr(win, "done_button"))
+    check("Reset to Shared Crop button was removed - the checkbox alone drives crop clearing",
+          not hasattr(win, "reset_cut_crop_button") and not hasattr(win, "reset_cut_crop"))
     export_labels = [w.text() for w in export_tab_page.findChildren(QLabel)]
     check("Export tab has an 'Audio' heading", "Audio" in export_labels, str(export_labels))
 
@@ -482,9 +620,11 @@ def main():
     check("...and never touched ffmpeg (no queue was built)",
           not getattr(win, "export_queue", None))
 
-    # Bring crops back into agreement so Combined becomes available again.
+    # Bring crops back into agreement so Combined becomes available again -
+    # clearing a cut's override directly, now that there's no dedicated
+    # button for it, and reselecting to resync the fields from shared_crop.
+    win.cuts[1].crop = None
     win.select_cut(1)
-    win.reset_cut_crop()
     win.update_combined_export_availability()
     check("Combined file export re-enables once every cut's crop agrees again",
           win.export_mode_combined.isEnabled())
@@ -699,6 +839,46 @@ def main():
     check("deleting the last row falls back to the new last row, not row 0",
           win.cut_list.currentRow() == len(win.cuts) - 1 == 0,
           f"currentRow={win.cut_list.currentRow()} cuts={win.cuts}")
+
+    # --- Cut list selection follows the playhead: selects whichever cut it's
+    # inside, deselects entirely in a gap between cuts (or before/after all
+    # of them), hiding the crop overlay since there's no single "current cut"
+    # to show one for ---
+    win.load_file(fixture)
+    win.write_end_field(2.0)  # cut 0: 0-2s
+    seek_and_add_cut(3.0)
+    win.write_end_field(5.0)  # cut 1: 3-5s
+    check("built 2 cuts with a real gap (2-3s) for playhead-selection testing",
+          len(win.cuts) == 2, str(win.cuts))
+
+    win.preview.player.setPosition(1000)  # 1s - inside cut 0
+    win.sync_selection_to_playhead()
+    check("playhead inside cut 0 selects it",
+          win.selected_cut_rows() == [0], str(win.selected_cut_rows()))
+    check("crop overlay is visible while a cut is selected", win.preview.crop_overlay_visible)
+
+    win.preview.player.setPosition(2500)  # 2.5s - in the gap
+    win.sync_selection_to_playhead()
+    check("playhead in the gap deselects the list entirely",
+          win.selected_cut_rows() == [], str(win.selected_cut_rows()))
+    check("crop overlay hides with nothing selected", not win.preview.crop_overlay_visible)
+
+    win.preview.player.setPosition(4000)  # 4s - inside cut 1
+    win.sync_selection_to_playhead()
+    check("playhead moving into cut 1 selects it",
+          win.selected_cut_rows() == [1], str(win.selected_cut_rows()))
+    check("crop overlay is visible again", win.preview.crop_overlay_visible)
+
+    win.preview.player.setPosition(5500)  # 5.5s - after the last cut
+    win.sync_selection_to_playhead()
+    check("playhead after every cut deselects the list",
+          win.selected_cut_rows() == [], str(win.selected_cut_rows()))
+    check("crop overlay hides after the last cut too", not win.preview.crop_overlay_visible)
+
+    win.cut_list.item(0).setSelected(True)
+    win.cut_list.item(1).setSelected(True)
+    check("manual multi-select also hides the crop overlay (no single current cut)",
+          not win.preview.crop_overlay_visible)
 
     win.load_file(fixture)
     orig_question = QMessageBox.question
