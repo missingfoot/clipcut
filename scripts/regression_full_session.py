@@ -546,6 +546,56 @@ def main():
     export_labels = [w.text() for w in export_tab_page.findChildren(QLabel)]
     check("Export tab has an 'Audio' heading", "Audio" in export_labels, str(export_labels))
 
+    # --- Timeline controls are icon-only, with the old text labels moved to
+    # tooltips - real icon resolution depends on the desktop's icon theme
+    # (this offscreen environment has none, same caveat as the cut list's
+    # icon earlier), so only text/tooltip/icon-type are checked here. ---
+    timeline_buttons_and_tooltips = [
+        # mute_button starts muted (audio_output.setMuted(True) in
+        # VideoPreview.__init__), so "Unmute" (not "Mute") is the correct
+        # initial tooltip - matching the actual state, not a hardcoded guess.
+        (win.mute_button, "Unmute"), (win.actual_size_button, "100%"),
+        (win.set_start_button, "Set Start"), (win.step_back_button, "Step Back"),
+        (win.play_button, "Play"), (win.step_forward_button, "Step Forward"),
+        (win.set_end_button, "Set End"),
+    ]
+    check("every timeline control button has no text label (icon-only)",
+          all(b.text() == "" for b, _ in timeline_buttons_and_tooltips),
+          str([(b.text()) for b, _ in timeline_buttons_and_tooltips]))
+    check("every timeline control button's old label is now its tooltip",
+          all(b.toolTip() == t for b, t in timeline_buttons_and_tooltips),
+          str([(b.toolTip(), t) for b, t in timeline_buttons_and_tooltips]))
+    check("every timeline control button carries a real QIcon",
+          all(isinstance(b.icon(), clipcut.QIcon) for b, _ in timeline_buttons_and_tooltips))
+
+    # Real starting mute state isn't assumed - this offscreen environment's
+    # QAudioOutput happens to default to muted (no real device backend),
+    # unlike a normal desktop session - so toggle relative to whatever it
+    # actually starts as instead of hardcoding a direction.
+    before_muted = win.preview.audio_output.isMuted()
+    win.toggle_mute()
+    after_muted = win.preview.audio_output.isMuted()
+    check("toggling mute flips the actual muted state", after_muted != before_muted)
+    check("...and the tooltip matches the new state",
+          win.mute_button.toolTip() == ("Unmute" if after_muted else "Mute"))
+    win.toggle_mute()
+    check("toggling mute again flips it back",
+          win.preview.audio_output.isMuted() == before_muted)
+    check("...and the tooltip matches too",
+          win.mute_button.toolTip() == ("Unmute" if before_muted else "Mute"))
+
+    win.toggle_actual_size()
+    check("switching to actual size flips the zoom button's tooltip to 'Fit'",
+          win.actual_size_button.toolTip() == "Fit")
+    win.toggle_actual_size()
+    check("switching back flips it to '100%'", win.actual_size_button.toolTip() == "100%")
+
+    win.on_playback_state_changed(clipcut.QMediaPlayer.PlayingState)
+    check("playback starting flips the play button's tooltip to 'Pause'",
+          win.play_button.toolTip() == "Pause")
+    win.on_playback_state_changed(clipcut.QMediaPlayer.PausedState)
+    check("playback pausing flips it back to 'Play'", win.play_button.toolTip() == "Play")
+
     def find_direct_layout(root_layout, widget):
         for i in range(root_layout.count()):
             item = root_layout.itemAt(i)

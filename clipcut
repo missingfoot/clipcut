@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, Qt, QProcess, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -551,14 +551,9 @@ class VideoPreview(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def _update_pan_cursor(self):
-        """Open-hand cursor whenever middle-drag panning is available (zoomed to 100%
-        and the video overflows the viewport on some axis), so it's discoverable."""
-        if not self.video_width or not self.video_height or not self.zoom_actual:
-            self.viewport().unsetCursor()
-            return
-        rect = self.viewport().rect()
-        pannable = self.video_width > rect.width() or self.video_height > rect.height()
-        self.viewport().setCursor(Qt.OpenHandCursor) if pannable else self.viewport().unsetCursor()
+        """Reset to the default cursor - the closed-hand cursor is only shown while
+        actually panning (middle button held), not as an always-on hover hint."""
+        self.viewport().unsetCursor()
 
     def load(self, path, video_width, video_height):
         self.video_width = video_width
@@ -1059,8 +1054,10 @@ class Scrubber(QWidget):
     seek_requested = Signal(float)
     segment_clicked = Signal(int)
     segment_edited = Signal(int, float, float)
+    stepped = Signal(int)  # +1/-1 per wheel notch - forward/back one frame or keyframe
 
     HANDLE_GRAB = 6
+    SNAP_GRAB = 10  # pixels - how close a dragged edge must land to another cut's edge to snap
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1071,6 +1068,36 @@ class Scrubber(QWidget):
         self._drag_segment = None  # index into self.segments currently being dragged
         self.keyframe_times = []
         self._dragging = None
+        self.edges_locked = False
+        self.snap_enabled = False
+        # Needed to receive mouseMoveEvent while no button is held, so hover
+        # can show a resize cursor over a draggable edge handle.
+        self.setMouseTracking(True)
+
+    def set_edges_locked(self, locked):
+        self.edges_locked = locked
+        self.unsetCursor()
+
+    def set_snap_enabled(self, enabled):
+        self.snap_enabled = enabled
+
+    def _snap_time(self, t, exclude_index):
+        """Snap t to the nearest OTHER segment's start/end within SNAP_GRAB
+        pixels, when snapping is on; otherwise (or with nothing close
+        enough) return t unchanged."""
+        if not self.snap_enabled or self.duration <= 0:
+            return t
+        x = self.x_for_time(t)
+        best_t, best_dist = t, self.SNAP_GRAB
+        for i, (start, end, _active, _fm) in enumerate(self.segments):
+            if i == exclude_index:
+                continue
+            for edge in (start, end):
+                dist = abs(x - self.x_for_time(edge))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_t = edge
+        return best_t
 
     def set_keyframes(self, times):
         self.keyframe_times = times
@@ -1107,7 +1134,7 @@ class Scrubber(QWidget):
             for kf in self.keyframe_times:
                 kx = self.x_for_time(kf)
                 painter.fillRect(kx, 0, 1, self.height(), QColor(255, 255, 255, 45))
-            for start, end, is_active in self.segments:
+            for start, end, is_active, _frame_mode in self.segments:
                 x1, x2 = self.x_for_time(start), self.x_for_time(end)
                 fill = QColor("#3a5f8a") if is_active else QColor("#2f4a63")
                 painter.fillRect(x1, 0, max(1, x2 - x1), self.height(), fill)
@@ -1128,12 +1155,12 @@ class Scrubber(QWidget):
     def _handle_at(self, x):
         if self.duration <= 0:
             return None, None
-        for i, (start, end, _active) in enumerate(self.segments):
+        for i, (start, end, _active, _frame_mode) in enumerate(self.segments):
             if abs(x - self.x_for_time(start)) <= self.HANDLE_GRAB:
                 return i, "start"
             if abs(x - self.x_for_time(end)) <= self.HANDLE_GRAB:
                 return i, "end"
-        for i, (start, end, _active) in enumerate(self.segments):
+        for i, (start, end, _active, _frame_mode) in enumerate(self.segments):
             if self.x_for_time(start) <= x <= self.x_for_time(end):
                 return i, "body"
         return None, "playhead"
@@ -1141,6 +1168,22 @@ class Scrubber(QWidget):
     def mousePressEvent(self, event):
         x = event.position().toPoint().x()
         index, kind = self._handle_at(x)
+        if event.button() == Qt.MiddleButton:
+            # Whole-cut move, mirroring the video preview's middle-drag pan -
+            # only in Frame mode, since Keyframe-mode cuts are anchored to
+            # detected keyframes rather than a freely-movable position.
+            if kind == "body" and index is not None and self.segments[index][3]:
+                self._dragging = "move"
+                self._drag_segment = index
+                self._move_anchor_x = x
+                self._move_orig = self.segments[index][:2]
+                self.setCursor(Qt.ClosedHandCursor)
+            return
+        if kind in ("start", "end") and self.edges_locked:
+            # Edges are locked against accidental drags (packing many cuts
+            # tightly together made a plain click too easy to mistake for a
+            # resize) - treat a hit on the handle as a body click instead.
+            kind = "body"
         if kind == "body":
             self.segment_clicked.emit(index)
             # Selection and seeking are not in conflict, and there's no other way
@@ -1152,28 +1195,142 @@ class Scrubber(QWidget):
         self._drag_to(x)
 
     def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._drag_to(event.position().toPoint().x())
+        x = event.position().toPoint().x()
+        if self._dragging == "move":
+            self._move_to(x)
+        elif self._dragging:
+            self._drag_to(x)
+        else:
+            _index, kind = self._handle_at(x)
+            if kind in ("start", "end") and not self.edges_locked:
+                self.setCursor(Qt.SizeHorCursor)
+            else:
+                self.unsetCursor()
 
     def mouseReleaseEvent(self, _event):
+        if self._dragging == "move":
+            self.unsetCursor()
         self._dragging = None
+
+    def wheelEvent(self, event):
+        if self.duration <= 0:
+            return
+        delta = event.angleDelta().y()
+        if delta != 0:
+            self.stepped.emit(1 if delta > 0 else -1)
+        event.accept()
 
     def _drag_to(self, x):
         t = self.time_for_x(x)
         if self._dragging == "start" and self._drag_segment is not None:
-            start, end, active = self.segments[self._drag_segment]
-            new_start = max(0.0, min(t, end - 0.1))
-            self.segments[self._drag_segment] = (new_start, end, active)
+            start, end, active, frame_mode = self.segments[self._drag_segment]
+            new_start = max(0.0, min(self._snap_time(t, self._drag_segment), end - 0.1))
+            self.segments[self._drag_segment] = (new_start, end, active, frame_mode)
             self.segment_edited.emit(self._drag_segment, new_start, end)
         elif self._dragging == "end" and self._drag_segment is not None:
-            start, end, active = self.segments[self._drag_segment]
-            new_end = min(self.duration, max(t, start + 0.1))
-            self.segments[self._drag_segment] = (start, new_end, active)
+            start, end, active, frame_mode = self.segments[self._drag_segment]
+            new_end = min(self.duration, max(self._snap_time(t, self._drag_segment), start + 0.1))
+            self.segments[self._drag_segment] = (start, new_end, active, frame_mode)
             self.segment_edited.emit(self._drag_segment, start, new_end)
         elif self._dragging == "playhead":
             self.position = t
             self.seek_requested.emit(t)
         self.update()
+
+    def _move_to(self, x):
+        delta = self.time_for_x(x) - self.time_for_x(self._move_anchor_x)
+        orig_start, orig_end = self._move_orig
+        length = orig_end - orig_start
+        new_start = max(0.0, min(orig_start + delta, self.duration - length))
+        new_end = new_start + length
+        if self.snap_enabled:
+            # Snap whichever edge (leading or trailing) lands closer to
+            # another cut's edge, shifting the whole cut by that amount so
+            # the two cuts end up touching with no gap or overlap.
+            shift_start = self._snap_time(new_start, self._drag_segment) - new_start
+            shift_end = self._snap_time(new_end, self._drag_segment) - new_end
+            shift = 0.0
+            if shift_start and (not shift_end or abs(shift_start) <= abs(shift_end)):
+                shift = shift_start
+            elif shift_end:
+                shift = shift_end
+            if shift:
+                new_start = max(0.0, min(new_start + shift, self.duration - length))
+                new_end = new_start + length
+        _start, _end, active, frame_mode = self.segments[self._drag_segment]
+        self.segments[self._drag_segment] = (new_start, new_end, active, frame_mode)
+        self.segment_edited.emit(self._drag_segment, new_start, new_end)
+        # Attach the playhead to the cut's new start so the preview shows
+        # exactly where it's being dragged to as it moves.
+        self.position = new_start
+        self.seek_requested.emit(new_start)
+        self.update()
+
+
+# Export format presets - "Original" (None) keeps today's behavior exactly
+# (stream-copy when the cut allows it, libx264 re-encode otherwise, same
+# container as the source). Every other entry is (ext, video codec args,
+# audio codec args) and always re-encodes - picking a specific format is a
+# deliberate conversion, not something worth stream-copy-optimizing.
+FORMAT_PRESETS = {
+    "Original": None,
+    "MP4 (H.264)": (".mp4", ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"],
+                     ["-c:a", "aac", "-b:a", "192k"]),
+    "MP4 (H.265)": (".mp4", ["-c:v", "libx265", "-crf", "20", "-preset", "veryfast", "-tag:v", "hvc1"],
+                     ["-c:a", "aac", "-b:a", "192k"]),
+    "WebM (VP9)": (".webm", ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0"],
+                    ["-c:a", "libopus", "-b:a", "128k"]),
+    "MKV (H.264)": (".mkv", ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"],
+                     ["-c:a", "aac", "-b:a", "192k"]),
+    "MP4 (AV1)": (".mp4", ["-c:v", "libsvtav1", "-crf", "30", "-preset", "8"],
+                   ["-c:a", "aac", "-b:a", "192k"]),
+}
+
+# Animated image formats - these don't fit FORMAT_PRESETS' plain codec-args
+# shape (no audio track at all, and GIF needs a generated-palette filter
+# chain rather than a fixed codec, for quality reasons - straight -c:v gif
+# looks banded). Handled as their own branch in build_ffmpeg_args.
+IMAGE_FORMAT_EXTS = {
+    "GIF": ".gif",
+    "WebP (Animated)": ".webp",
+}
+
+# libwebp's content-type presets - the real "reduce blockiness" lever, since
+# ffmpeg's libwebp/libwebp_anim wrapper only exposes lossless/preset/quality
+# (no compression-effort/method option to tune, unlike the standalone cwebp
+# tool). Trimmed to the ones relevant to video-derived clips - "Indoor"
+# (libwebp's "picture") and "Outdoor" (libwebp's "photo") are relabeled for
+# clarity since that's the actual distinction between them; None/Icon/Text
+# were dropped as irrelevant to video content. "Default" is the default -
+# users can switch to Outdoor/Indoor/Drawing if blockiness shows up.
+WEBP_PRESETS = {
+    "Default": 0,
+    "Indoor": 1,
+    "Outdoor": 2,
+    "Drawing": 3,
+}
+
+# GIF-only: paletteuse's dithering mode. This is the single biggest lever
+# for GIF file size beyond fps/colors/scale - error-diffusion dithering
+# (Smooth) scatters different noise onto every frame, which is great for
+# gradients but defeats GIF's frame-to-frame LZW compression; ordered
+# dithering (Compact) is deterministic per-pixel-position so repeated/static
+# regions compress far better, and None skips dithering entirely (visible
+# color banding, but the smallest and most compressible output of the three).
+GIF_DITHER_MODES = {
+    "Smooth": "sierra2_4a",
+    "Compact": "bayer",
+    "None": "none",
+}
+
+# ffmpeg's gif encoder doesn't do real frame-to-frame delta compression at
+# all (verified: paletteuse's diff_mode=rectangle changes nothing about
+# output size, only its own internal processing speed) - every frame is
+# independently LZW-compressed. gifsicle's -O3 does the actual delta-frame
+# optimization Photoshop's "Save for Web" used to, which is what actually
+# closes the size gap; --lossy trades a little visual fidelity for a lot
+# more of it. Checked once at import time since it never changes mid-run.
+GIFSICLE_PATH = shutil.which("gifsicle")
 
 
 BG_COLOR_CHOICES = (
@@ -1193,6 +1350,44 @@ LINE_COLOR_CHOICES = (
     ("Orange", QColor(255, 165, 0)),
     ("Yellow", QColor(255, 255, 0)),
 )
+
+
+class ScrollAdjustLineEdit(QLineEdit):
+    """A QLineEdit whose numeric value nudges up/down by `step` per mouse-
+    wheel notch, clamped to [minimum, maximum] - lets the GIF/WebP quality
+    knobs be tuned without needing a full spin box. If allow_blank, scrolling
+    below minimum clears the field back to blank ("Original") instead of
+    clamping there, so Frame rate can scroll all the way back off."""
+
+    def __init__(self, text="", minimum=0, maximum=100, step=1, allow_blank=False, parent=None):
+        super().__init__(text, parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self.allow_blank = allow_blank
+
+    def wheelEvent(self, event):
+        delta = self.step if event.angleDelta().y() > 0 else -self.step
+        text = self.text().strip()
+        if not text:
+            if delta < 0:
+                event.accept()
+                return
+            value = self.minimum
+        else:
+            try:
+                value = float(text) + delta
+            except ValueError:
+                event.ignore()
+                return
+        if self.allow_blank and value < self.minimum:
+            self.setText("")
+        else:
+            # Rounding first kills float noise from repeated fractional
+            # steps (e.g. 0.1 + 0.1 + 0.1 landing on 0.30000000000000004).
+            value = round(max(self.minimum, min(self.maximum, value)), 4)
+            self.setText(str(int(value)) if value == int(value) else str(value))
+        event.accept()
 
 
 class MainWindow(QMainWindow):
@@ -1241,44 +1436,89 @@ class MainWindow(QMainWindow):
         self.scrubber.seek_requested.connect(self.on_seek_requested)
         self.scrubber.segment_clicked.connect(self.on_segment_clicked)
         self.scrubber.segment_edited.connect(self.on_segment_edited)
+        self.scrubber.stepped.connect(self.on_scrubber_stepped)
         below_preview.addWidget(self.scrubber)
+
+        def icon_button(icon_name, tooltip):
+            """Icon-only button - the label lives in the tooltip instead of on
+            the button face, matching every other control in this row."""
+            button = QPushButton()
+            button.setIcon(QIcon.fromTheme(icon_name))
+            button.setIconSize(QSize(16, 16))
+            button.setToolTip(tooltip)
+            return button
 
         controls_row = QHBoxLayout()
 
-        self.mute_button = QPushButton("Unmute")
+        # self.preview.audio_output starts muted (see VideoPreview.__init__) -
+        # match that here instead of hardcoding the unmuted icon/tooltip, or
+        # the first click looks like a no-op (it really does flip the mute
+        # state, but the icon/tooltip were already wrong to begin with, so
+        # nothing visibly changes until the second click).
+        muted = self.preview.audio_output.isMuted()
+        self.mute_button = icon_button(
+            "player-volume-muted-symbolic" if muted else "player-volume-symbolic",
+            "Unmute" if muted else "Mute")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setEnabled(False)
         controls_row.addWidget(self.mute_button)
 
-        self.actual_size_button = QPushButton("100%")
-        self.actual_size_button.setToolTip("Show the video at its native pixel size instead of fit-to-panel")
+        self.actual_size_button = icon_button("zoom-in-symbolic", "100%")
         self.actual_size_button.clicked.connect(self.toggle_actual_size)
         self.actual_size_button.setEnabled(False)
         controls_row.addWidget(self.actual_size_button)
 
+        # Off by default (matches today's drag-to-resize behavior) - turning
+        # it on protects against accidentally dragging a cut's start/end
+        # handle when many cuts are packed tightly together on the timeline.
+        self.lock_edges_button = icon_button("changes-allow-symbolic", "Lock Cut Edges")
+        self.lock_edges_button.setCheckable(True)
+        self.lock_edges_button.toggled.connect(self.on_lock_edges_toggled)
+        self.lock_edges_button.setEnabled(False)
+        controls_row.addWidget(self.lock_edges_button)
+
+        # Off by default - loops playback within whichever single cut is
+        # currently selected, instead of running past it. A separate toggle
+        # rather than tying looping to selection itself, since selection is
+        # also what drives the crop overlay/Start-End fields - overloading it
+        # would make selecting a cut to edit also silently start looping it.
+        self.loop_button = icon_button("media-playlist-repeat-symbolic", "Loop Cut")
+        self.loop_button.setCheckable(True)
+        self.loop_button.toggled.connect(self.on_loop_toggled)
+        self.loop_button.setEnabled(False)
+        controls_row.addWidget(self.loop_button)
+
+        # Off by default - when on, dragging a cut's edge or the whole cut
+        # snaps it to touch a neighboring cut's edge exactly, no gap/overlap.
+        self.snap_button = icon_button("snap-symbolic", "Snap to Cuts")
+        self.snap_button.setCheckable(True)
+        self.snap_button.toggled.connect(self.on_snap_toggled)
+        self.snap_button.setEnabled(False)
+        controls_row.addWidget(self.snap_button)
+
         controls_row.addStretch()
 
-        self.set_start_button = QPushButton("Set Start")
+        self.set_start_button = icon_button("bboxprev-symbolic", "Set Start")
         self.set_start_button.clicked.connect(self.set_start_from_playhead)
         self.set_start_button.setEnabled(False)
         controls_row.addWidget(self.set_start_button)
 
-        self.step_back_button = QPushButton("<<")
+        self.step_back_button = icon_button("media-seek-backward-symbolic", "Step Back")
         self.step_back_button.clicked.connect(self.step_back)
         self.step_back_button.setEnabled(False)
         controls_row.addWidget(self.step_back_button)
 
-        self.play_button = QPushButton("Play")
+        self.play_button = icon_button("media-playback-start-symbolic", "Play")
         self.play_button.clicked.connect(self.toggle_playback)
         self.play_button.setEnabled(False)
         controls_row.addWidget(self.play_button)
 
-        self.step_forward_button = QPushButton(">>")
+        self.step_forward_button = icon_button("media-seek-forward-symbolic", "Step Forward")
         self.step_forward_button.clicked.connect(self.step_forward)
         self.step_forward_button.setEnabled(False)
         controls_row.addWidget(self.step_forward_button)
 
-        self.set_end_button = QPushButton("Set End")
+        self.set_end_button = icon_button("bboxnext-symbolic", "Set End")
         self.set_end_button.clicked.connect(self.set_end_from_playhead)
         self.set_end_button.setEnabled(False)
         controls_row.addWidget(self.set_end_button)
@@ -1603,10 +1843,127 @@ class MainWindow(QMainWindow):
         export_tab_layout = QVBoxLayout(export_tab_page)
         export_tab_layout.setContentsMargins(8, 8, 8, 8)
         export_tab_layout.setSpacing(8)
-        export_tab_layout.addWidget(make_heading("Audio"))
-        export_tab_layout.addWidget(self.remove_audio)
-        export_tab_layout.addWidget(self.audio_only)
+
+        export_tab_layout.addWidget(make_heading("Format"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(list(FORMAT_PRESETS.keys()) + list(IMAGE_FORMAT_EXTS.keys()))
+        self.format_combo.currentTextChanged.connect(self.on_format_changed)
+        export_tab_layout.addWidget(self.format_combo)
+        export_tab_layout.addWidget(make_note(
+            "Original: same container/codec as the source (fast, re-encodes only "
+            "when a crop or frame-accurate cut requires it). Any other choice "
+            "always re-encodes to that format. GIF/WebP exports never include audio."))
+
+        # GIF/WebP-only quality knobs - a lower frame rate and, for WebP, a
+        # content-appropriate preset are the main levers for bringing an
+        # animated export down from a 1080p source and for reducing WebP's
+        # blocky macroblock artifacts (its lossy mode is VP8-based - the
+        # "Photo" preset tunes its quantization for real footage instead of
+        # flat graphics, which is what actually cuts blockiness, not a raw
+        # compression-effort number ffmpeg's libwebp wrapper doesn't even
+        # expose). Rows hide individually depending on which of GIF/WebP is
+        # selected; the whole widget hides for every ordinary video format.
+        # Fixed-width fields (not a QFormLayout) so label/box/unit line up
+        # as a compact 3-column table that still leaves room for the unit
+        # column in the sidebar's fixed width.
+        self.image_options_widget = QWidget()
+        image_options_grid = QGridLayout(self.image_options_widget)
+        image_options_grid.setContentsMargins(0, 0, 0, 0)
+        image_options_grid.setHorizontalSpacing(8)
+        # Column 1 absorbs any leftover row width - line edits stay capped at
+        # their own maximumWidth regardless (the extra space just sits empty
+        # in their cell), but it's what lets the unit-less Preset row's combo
+        # box actually stretch out to the row's full width.
+        image_options_grid.setColumnStretch(1, 1)
+
+        def image_option_row(row, label_text, field, unit_text, max_width=90):
+            label = QLabel(label_text)
+            image_options_grid.addWidget(label, row, 0)
+            if unit_text:
+                field.setMaximumWidth(max_width)
+                image_options_grid.addWidget(field, row, 1)
+                unit_label = QLabel(unit_text)
+                # QPalette.Mid (a 3D-bevel shading role, not text) is near-
+                # black in this theme and made the label unreadable -
+                # PlaceholderText is the actual "dim but legible" text role.
+                unit_label.setForegroundRole(QPalette.PlaceholderText)
+                image_options_grid.addWidget(unit_label, row, 2)
+                return (label, field, unit_label)
+            # No unit label (Preset) - span columns 1-2 and stretch full width.
+            image_options_grid.addWidget(field, row, 1, 1, 2)
+            return (label, field)
+
+        self.image_fps_edit = ScrollAdjustLineEdit(minimum=1, maximum=120, step=1, allow_blank=True)
+        self.image_fps_edit.setPlaceholderText("Original")
+        self.image_fps_row = image_option_row(0, "Frame rate", self.image_fps_edit, "fps")
+        self.webp_quality_edit = ScrollAdjustLineEdit("80", minimum=0, maximum=100, step=1)
+        self.webp_quality_row = image_option_row(1, "Quality", self.webp_quality_edit, "0-100")
+        self.webp_preset_combo = QComboBox()
+        self.webp_preset_combo.addItems(list(WEBP_PRESETS.keys()))
+        self.webp_preset_combo.setCurrentText("Default")
+        self.webp_preset_row = image_option_row(2, "Preset", self.webp_preset_combo, "")
+        self.gif_colors_edit = ScrollAdjustLineEdit("256", minimum=2, maximum=256, step=8)
+        self.gif_colors_row = image_option_row(3, "Colors", self.gif_colors_edit, "2-256")
+        self.gif_dither_combo = QComboBox()
+        self.gif_dither_combo.addItems(list(GIF_DITHER_MODES.keys()))
+        self.gif_dither_row = image_option_row(4, "Dither", self.gif_dither_combo, "")
+        # Grayscale halves what the palette needs to represent (no hue/
+        # chroma variation left at all) - a blunter, much easier-to-reason-
+        # about version of the saturation slider this replaced.
+        self.gif_grayscale_check = QCheckBox("Black and white")
+        image_options_grid.addWidget(self.gif_grayscale_check, 5, 0, 1, 3)
+        self.gif_grayscale_row = (self.gif_grayscale_check,)
+        # gifsicle does real frame-to-frame delta compression ffmpeg's own
+        # gif encoder can't - by far the biggest lever for actually small
+        # files, so it's on by default (it's a hard package dependency, so
+        # it's there whenever the app is; export_gif_optimize's own
+        # GIFSICLE_PATH check is just a quiet safety net for running from
+        # source without the package installed, not something the UI needs
+        # to reflect).
+        self.gif_optimize_check = QCheckBox("Optimize with gifsicle")
+        self.gif_optimize_check.setChecked(True)
+        image_options_grid.addWidget(self.gif_optimize_check, 6, 0, 1, 3)
+        self.gif_optimize_row = (self.gif_optimize_check,)
+        export_tab_layout.addWidget(self.image_options_widget)
         export_tab_layout.addWidget(make_separator())
+
+        export_tab_layout.addWidget(make_heading("Scale"))
+        scale_row = QHBoxLayout()
+        self.scale_mode_combo = QComboBox()
+        self.scale_mode_combo.addItems(["Percentage", "Longest side"])
+        self.scale_mode_combo.currentTextChanged.connect(self.update_scale_default)
+        scale_row.addWidget(self.scale_mode_combo)
+        self.scale_value_edit = ScrollAdjustLineEdit(minimum=1, maximum=1000, step=5, allow_blank=True)
+        scale_row.addWidget(self.scale_value_edit)
+        self.scale_unit_label = QLabel()
+        self.scale_unit_label.setForegroundRole(QPalette.PlaceholderText)
+        scale_row.addWidget(self.scale_unit_label)
+        export_tab_layout.addLayout(scale_row)
+        # Establish the initial unit label/placeholder for the current
+        # ("Percentage") selection - currentTextChanged only fires on a
+        # later change.
+        self.update_scale_default()
+        export_tab_layout.addWidget(make_note(
+            "Applies to every format, including GIF/WebP where a 1080p source "
+            "would otherwise export at full resolution. Longest side scales by "
+            "whichever of width/height is larger, keeping the other proportional."))
+        export_tab_layout.addWidget(make_separator())
+
+        # GIF/WebP never carry audio (build_ffmpeg_args always passes -an for
+        # them) - this whole section hides for those formats rather than
+        # sitting there having no effect.
+        self.audio_section_widget = QWidget()
+        audio_section_layout = QVBoxLayout(self.audio_section_widget)
+        audio_section_layout.setContentsMargins(0, 0, 0, 0)
+        audio_section_layout.addWidget(make_heading("Audio"))
+        audio_section_layout.addWidget(self.remove_audio)
+        audio_section_layout.addWidget(self.audio_only)
+        export_tab_layout.addWidget(self.audio_section_widget)
+        export_tab_layout.addWidget(make_separator())
+
+        # Establish initial widget visibility for the current ("Original")
+        # selection - currentTextChanged only fires on a later change.
+        self.on_format_changed(self.format_combo.currentText())
 
         suffix_form = QFormLayout()
         self.suffix_edit = QLineEdit()
@@ -1701,6 +2058,7 @@ class MainWindow(QMainWindow):
             self.crop_style_combo, self.bg_color_combo, self.line_color_combo,
             self.process_button, self.play_button, self.step_back_button,
             self.step_forward_button, self.mute_button, self.actual_size_button,
+            self.lock_edges_button, self.loop_button, self.snap_button,
             self.remove_file_button, self.set_start_button, self.set_end_button,
             self.detect_scenes_button,
         ]
@@ -1713,6 +2071,12 @@ class MainWindow(QMainWindow):
         # before they can bubble up to us. Intercept at the viewport via an event filter.
         self.preview.viewport().installEventFilter(self)
 
+        # App-wide, so Space toggles play/pause no matter what has focus - except
+        # widgets where Space already means something (typing a space, activating
+        # a button/checkbox, opening a combo box, moving a list selection), which
+        # only get that meaning back once deliberately Tab-focused onto them.
+        QApplication.instance().installEventFilter(self)
+
         self.preview.player.positionChanged.connect(self.on_player_position_changed)
         self.preview.player.playbackStateChanged.connect(self.on_playback_state_changed)
 
@@ -1720,6 +2084,12 @@ class MainWindow(QMainWindow):
             self.load_file(initial_path)
 
     def eventFilter(self, obj, event):
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space
+                and not event.isAutoRepeat() and self.play_button.isEnabled()
+                and not isinstance(obj, (QLineEdit, QPushButton, QCheckBox, QRadioButton,
+                                          QComboBox, QAbstractItemView))):
+            self.toggle_playback()
+            return True
         if obj is self.preview.viewport():
             if event.type() in (QEvent.DragEnter, QEvent.DragMove):
                 if event.mimeData().hasUrls():
@@ -1770,6 +2140,11 @@ class MainWindow(QMainWindow):
         self.video_width, self.video_height = w, h
         self.duration = duration
         self.video_fps = fps
+        # Pre-filled with the source's real frame rate as an editable value
+        # (not just a placeholder) so nudging it up/down starts from the
+        # actual number instead of an invisible implicit default.
+        self.image_fps_edit.setText(f"{fps:.3f}".rstrip("0").rstrip("."))
+        self.update_scale_default()
         self.keyframe_times = get_keyframe_times(path)
         self.set_filename_label(path.name)
         self.browse_button.setText("Replace File...")
@@ -1794,7 +2169,8 @@ class MainWindow(QMainWindow):
         self.crop_width_edit.setPlaceholderText(str(w))
         self.crop_height_edit.setPlaceholderText(str(h))
         self.set_file_dependent_widgets_enabled(True)
-        self.actual_size_button.setText("100%")
+        self.actual_size_button.setIcon(QIcon.fromTheme("zoom-in-symbolic"))
+        self.actual_size_button.setToolTip("100%")
         self.status.setText("")
         self.update_suffix_placeholder()
 
@@ -1809,6 +2185,9 @@ class MainWindow(QMainWindow):
         self.video_height = None
         self.duration = None
         self.video_fps = None
+        self.image_fps_edit.clear()
+        self.image_fps_edit.setPlaceholderText("Original")
+        self.update_scale_default()
         self.keyframe_times = []
         self.cuts = []
         self.cut_list.clear()
@@ -1839,7 +2218,8 @@ class MainWindow(QMainWindow):
         self.aspect_combo.setCurrentIndex(0)
         self.orient_horizontal.setChecked(True)
         self.set_file_dependent_widgets_enabled(False)
-        self.actual_size_button.setText("100%")
+        self.actual_size_button.setIcon(QIcon.fromTheme("zoom-in-symbolic"))
+        self.actual_size_button.setToolTip("100%")
         self.status.setText("")
         self.update_suffix_placeholder()
         self.update_combined_export_availability()
@@ -2687,7 +3067,7 @@ class MainWindow(QMainWindow):
         segments = []
         for i, cut in enumerate(self.cuts):
             start, end = self.trim_seconds_for_cut(cut)
-            segments.append((start, end, i == self.active_cut))
+            segments.append((start, end, i == self.active_cut, cut.frame_mode))
         self.scrubber.set_cuts(segments)
 
     def sync_selection_to_playhead(self):
@@ -2789,6 +3169,14 @@ class MainWindow(QMainWindow):
         lands would otherwise compute from a stale, pre-seek position."""
         return self.preview.player.position() / 1000.0
 
+    def on_scrubber_stepped(self, direction):
+        """Wheel-scroll over the timeline steps the playhead one frame (Frame mode)
+        or one keyframe (Keyframe mode) at a time, matching Step Back/Forward."""
+        if direction > 0:
+            self.step_forward()
+        else:
+            self.step_back()
+
     def step_back(self):
         pos = self.current_position()
         if self.frame_mode:
@@ -2808,14 +3196,96 @@ class MainWindow(QMainWindow):
     def toggle_mute(self):
         muted = not self.preview.audio_output.isMuted()
         self.preview.audio_output.setMuted(muted)
-        self.mute_button.setText("Unmute" if muted else "Mute")
+        icon = "player-volume-muted-symbolic" if muted else "player-volume-symbolic"
+        self.mute_button.setIcon(QIcon.fromTheme(icon))
+        self.mute_button.setToolTip("Unmute" if muted else "Mute")
 
     def toggle_actual_size(self):
         """Toggle the preview between scaled-to-fit and native pixel size; the window
         and sidebar are untouched, only how the video renders within the preview panel."""
         actual = not self.preview.zoom_actual
         self.preview.set_zoom_actual(actual)
-        self.actual_size_button.setText("Fit" if actual else "100%")
+        icon = "view-zoom-fit-symbolic" if actual else "zoom-in-symbolic"
+        self.actual_size_button.setIcon(QIcon.fromTheme(icon))
+        self.actual_size_button.setToolTip("Fit" if actual else "100%")
+
+    def on_format_changed(self, format_name):
+        is_gif = format_name == "GIF"
+        is_webp = format_name == "WebP (Animated)"
+        is_image = is_gif or is_webp
+
+        def set_row_visible(row, visible):
+            for widget in row:
+                widget.setVisible(visible)
+
+        self.audio_section_widget.setVisible(not is_image)
+        self.image_options_widget.setVisible(is_image)
+        set_row_visible(self.image_fps_row, is_image)          # shared by both
+        set_row_visible(self.webp_quality_row, is_webp)
+        set_row_visible(self.webp_preset_row, is_webp)
+        set_row_visible(self.gif_colors_row, is_gif)
+        set_row_visible(self.gif_dither_row, is_gif)
+        set_row_visible(self.gif_grayscale_row, is_gif)
+        set_row_visible(self.gif_optimize_row, is_gif)
+
+    def update_scale_default(self):
+        """Keeps the Scale field's unit label, scroll-step range, and
+        pre-filled value in sync with the current mode - percent defaults to
+        100 (a no-op scale), Longest side defaults to the source's actual
+        longest dimension, both editable in place rather than hidden behind
+        a generic "Original" placeholder. Called on mode change and on every
+        load/remove_file, since the sensible default differs per source."""
+        is_percentage = self.scale_mode_combo.currentText() == "Percentage"
+        self.scale_value_edit.minimum = 1 if is_percentage else 2
+        self.scale_value_edit.maximum = 1000 if is_percentage else 7680
+        self.scale_value_edit.step = 5 if is_percentage else 10
+        self.scale_unit_label.setText("%" if is_percentage else "px")
+        if not self.path:
+            self.scale_value_edit.clear()
+            self.scale_value_edit.setPlaceholderText("Original")
+            return
+        if is_percentage:
+            self.scale_value_edit.setText("100")
+        else:
+            self.scale_value_edit.setText(str(max(self.video_width, self.video_height)))
+
+    def on_lock_edges_toggled(self, locked):
+        self.scrubber.set_edges_locked(locked)
+        icon = "changes-prevent-symbolic" if locked else "changes-allow-symbolic"
+        self.lock_edges_button.setIcon(QIcon.fromTheme(icon))
+        self.lock_edges_button.setToolTip("Unlock Cut Edges" if locked else "Lock Cut Edges")
+
+    def on_snap_toggled(self, enabled):
+        self.scrubber.set_snap_enabled(enabled)
+        self.snap_button.setToolTip("Stop Snapping" if enabled else "Snap to Cuts")
+
+    def on_loop_toggled(self, looping):
+        self.loop_button.setToolTip("Stop Looping" if looping else "Loop Cut")
+        if looping:
+            rows = self.selected_cut_rows()
+            if len(rows) == 1:
+                cut_index = self.cut_list.item(rows[0]).data(Qt.UserRole)
+                start, _end = self.trim_seconds_for_cut(self.cuts[cut_index])
+                self.preview.player.setPosition(int(start * 1000))
+
+    def enforce_loop(self, seconds):
+        """When Loop is on and exactly one cut is selected, jump back to that
+        cut's start once playback reaches its end, instead of running past it.
+        Returns True if it seeked - the caller must skip
+        sync_selection_to_playhead for this update in that case, or seeing
+        the momentary past-the-end position would deselect the cut being
+        looped before the seek-triggered positionChanged arrives to fix it."""
+        if not self.loop_button.isChecked():
+            return False
+        rows = self.selected_cut_rows()
+        if len(rows) != 1:
+            return False
+        cut_index = self.cut_list.item(rows[0]).data(Qt.UserRole)
+        start, end = self.trim_seconds_for_cut(self.cuts[cut_index])
+        if seconds >= end - 0.001:
+            self.preview.player.setPosition(int(start * 1000))
+            return True
+        return False
 
     def set_start_from_playhead(self):
         self.write_start_field(self.current_position())
@@ -2824,13 +3294,23 @@ class MainWindow(QMainWindow):
         self.write_end_field(self.current_position())
 
     def on_playback_state_changed(self, state):
-        self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+        playing = state == QMediaPlayer.PlayingState
+        icon = "media-playback-pause-symbolic" if playing else "media-playback-start-symbolic"
+        self.play_button.setIcon(QIcon.fromTheme(icon))
+        self.play_button.setToolTip("Pause" if playing else "Play")
 
     def on_player_position_changed(self, position_ms):
         seconds = position_ms / 1000
         self.scrubber.set_position(seconds)
         self.time_label.setText(f"{format_time(seconds)} / {format_time(self.duration or 0)}")
-        self.sync_selection_to_playhead()
+        if not self.enforce_loop(seconds):
+            # While looping, selection is locked to whichever cut is being
+            # looped rather than following the playhead - a mid-seek position
+            # can transiently land outside the cut's range (e.g. passing
+            # through 0) as the player jumps back to its start, which would
+            # otherwise flash the row's selection off and back on every lap.
+            if not self.loop_button.isChecked():
+                self.sync_selection_to_playhead()
 
     def on_seek_requested(self, seconds):
         self.preview.player.setPosition(int(seconds * 1000))
@@ -2844,6 +3324,7 @@ class MainWindow(QMainWindow):
             self.remove_audio.setChecked(False)
         for widget in self.crop_edits:
             widget.setEnabled(not checked)
+        self.format_combo.setEnabled(not checked)
 
     def read_frame_fields_seconds(self):
         if self.duration is None:
@@ -2905,6 +3386,69 @@ class MainWindow(QMainWindow):
             raise ValueError("crop margins exceed frame size")
         return left, top, crop_w, crop_h, has_crop
 
+    def build_scale_filter(self, width, height):
+        """Return a scale=... filter string for the given (post-crop) output
+        dimensions, or None if the Scale field is blank (original size).
+        Raises ValueError on bad input."""
+        text = self.scale_value_edit.text().strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError("scale value must be a number")
+        if value <= 0:
+            raise ValueError("scale value must be > 0")
+        if self.scale_mode_combo.currentText() == "Percentage":
+            factor = value / 100.0
+            # trunc(.../2)*2 keeps both dimensions even, which most codecs
+            # (yuv420p chroma subsampling) require.
+            return f"scale=trunc(iw*{factor}/2)*2:trunc(ih*{factor}/2)*2"
+        target = int(round(value))
+        if target % 2:
+            target += 1
+        return f"scale={target}:-2" if width >= height else f"scale=-2:{target}"
+
+    def build_fps_filter(self):
+        """GIF/WebP-only: return a fps=... filter, or None if left blank
+        (original frame rate). The main lever for shrinking an animated
+        export beyond what quality/compression alone can do."""
+        text = self.image_fps_edit.text().strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError("frame rate must be a number")
+        if value <= 0:
+            raise ValueError("frame rate must be > 0")
+        return f"fps={value}"
+
+    def build_eq_filter(self):
+        """GIF-only: return an eq=saturation=0 filter when Black and white
+        is checked, else None."""
+        return "eq=saturation=0" if self.gif_grayscale_check.isChecked() else None
+
+    def gif_max_colors(self):
+        text = self.gif_colors_edit.text().strip() or "256"
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError("max colors must be a whole number")
+        if not 2 <= value <= 256:
+            raise ValueError("max colors must be between 2 and 256")
+        return value
+
+    def webp_quality(self):
+        text = self.webp_quality_edit.text().strip() or "80"
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError("quality must be a whole number")
+        if not 0 <= value <= 100:
+            raise ValueError("quality must be between 0 and 100")
+        return value
+
     def compute_default_suffix(self):
         """Best-effort suffix reflecting current options, for the placeholder text."""
         if self.audio_only.isChecked():
@@ -2934,12 +3478,18 @@ class MainWindow(QMainWindow):
         self.suffix_edit.setPlaceholderText(self.compute_default_suffix())
 
     def export_ext(self):
-        return ".m4a" if self.audio_only.isChecked() else self.path.suffix
+        if self.audio_only.isChecked():
+            return ".m4a"
+        format_name = self.format_combo.currentText()
+        if format_name in IMAGE_FORMAT_EXTS:
+            return IMAGE_FORMAT_EXTS[format_name]
+        preset = FORMAT_PRESETS[format_name]
+        return preset[0] if preset else self.path.suffix
 
     def build_ffmpeg_args(self, out_path):
         """Return (cmd, target_duration) for the currently-active cut's trim/crop/
-        audio settings, writing to the given out_path. Raises ValueError on bad
-        input. Path-agnostic, reused by every export path (single, per-cut,
+        audio/format settings, writing to the given out_path. Raises ValueError on
+        bad input. Path-agnostic, reused by every export path (single, per-cut,
         combined)."""
         start, end = self.get_trim_times()
         target_duration = end - start
@@ -2949,15 +3499,60 @@ class MainWindow(QMainWindow):
             cmd += ["-vn", "-c:a", "copy", str(out_path)]
             return cmd, target_duration
 
+        format_name = self.format_combo.currentText()
         left, top, crop_w, crop_h, has_crop = self.get_crop()
-        if has_crop:
-            cmd += ["-vf", f"crop={crop_w}:{crop_h}:{left}:{top}",
-                    "-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
+        crop_filter = f"crop={crop_w}:{crop_h}:{left}:{top}" if has_crop else None
+        effective_w = crop_w if has_crop else self.video_width
+        effective_h = crop_h if has_crop else self.video_height
+        scale_filter = self.build_scale_filter(effective_w, effective_h)
+        vf_parts = [f for f in (crop_filter, scale_filter) if f]
+
+        if format_name == "GIF":
+            # A generated palette (rather than the plain gif codec's fixed
+            # web-safe one) is what actually gives GIF output good color -
+            # fps/crop/scale, if any, have to happen upstream of that same
+            # filter chain, not as a separate -vf.
+            eq_filter = self.build_eq_filter()
+            fps_filter = self.build_fps_filter()
+            parts = ([eq_filter] if eq_filter else []) + ([fps_filter] if fps_filter else []) + vf_parts
+            prefix = ",".join(parts) + "," if parts else ""
+            max_colors = self.gif_max_colors()
+            dither = GIF_DITHER_MODES[self.gif_dither_combo.currentText()]
+            chain = (f"{prefix}split[s0][s1];[s0]palettegen=stats_mode=diff:"
+                     f"max_colors={max_colors}[p];[s1][p]paletteuse=dither={dither}")
+            cmd += ["-vf", chain, "-an", str(out_path)]
+            return cmd, target_duration
+
+        if format_name == "WebP (Animated)":
+            fps_filter = self.build_fps_filter()
+            parts = ([fps_filter] if fps_filter else []) + vf_parts
+            if parts:
+                cmd += ["-vf", ",".join(parts)]
+            quality = self.webp_quality()
+            preset = WEBP_PRESETS[self.webp_preset_combo.currentText()]
+            cmd += ["-c:v", "libwebp_anim", "-lossless", "0", "-quality", str(quality),
+                    "-preset", str(preset), "-loop", "0", "-an", str(out_path)]
+            return cmd, target_duration
+
+        preset = FORMAT_PRESETS[format_name]
+        if vf_parts:
+            # Scaling (like cropping) can't stream-copy - it always needs a
+            # real re-encode, even in Original/keyframe mode.
+            cmd += ["-vf", ",".join(vf_parts)]
+            cmd += preset[1] if preset else ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
+        elif preset:
+            cmd += preset[1]
         elif self.frame_mode:
             cmd += ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"]
         else:
             cmd += ["-c:v", "copy"]
-        cmd += ["-an"] if self.remove_audio.isChecked() else ["-c:a", "copy"]
+
+        if self.remove_audio.isChecked():
+            cmd += ["-an"]
+        elif preset:
+            cmd += preset[2]
+        else:
+            cmd += ["-c:a", "copy"]
         cmd.append(str(out_path))
         return cmd, target_duration
 
@@ -3005,6 +3600,9 @@ class MainWindow(QMainWindow):
         self.export_queue = queue
         self.export_total = len(queue)
         self.export_current = 0
+        self.export_gif_optimize = (self.format_combo.currentText() == "GIF"
+                                     and self.gif_optimize_check.isChecked()
+                                     and GIFSICLE_PATH is not None)
         self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
         self.run_next_export()
@@ -3039,6 +3637,10 @@ class MainWindow(QMainWindow):
         self.export_total = len(queue)
         self.export_current = 0
         self.export_is_combined = True
+        # The per-cut parts are temp files discarded after concat - never
+        # worth optimizing. Only the final joined output (set in run_concat)
+        # is a real GIF export worth running gifsicle on.
+        self.export_gif_optimize = False
         self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
         self.run_next_export()
@@ -3055,6 +3657,9 @@ class MainWindow(QMainWindow):
 
         self.pending_out_path = out_path
         self.export_is_combined = False  # concat's own finish should behave like a normal single completion
+        self.export_gif_optimize = (self.format_combo.currentText() == "GIF"
+                                     and self.gif_optimize_check.isChecked()
+                                     and GIFSICLE_PATH is not None)
         self.progress_target_duration = 0
         self.progress_percent = 0
         self.spinner_index = 0
@@ -3151,6 +3756,40 @@ class MainWindow(QMainWindow):
         src_stat = self.path.stat()
         os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
         self.error_details_button.setVisible(False)
+        if getattr(self, "export_gif_optimize", False):
+            self.run_gifsicle(out_path)
+        else:
+            self.run_next_export()
+
+    def run_gifsicle(self, out_path):
+        """gifsicle's -b rewrites the file in place (it reads the whole
+        input before writing output, so this is safe) - -O3 is its full
+        optimization level, --lossy trades a little fidelity for a lot more
+        compression than ffmpeg's palette approach alone can reach."""
+        self.pending_out_path = out_path
+        self.progress_target_duration = 0  # gifsicle has no -progress-style output to parse
+        self.progress_percent = 0
+        self.spinner_index = 0
+        self.spinner_label = "Optimizing"
+        self.advance_spinner()
+        self.spinner_timer.start()
+        self.process = QProcess(self)
+        self.process.readyReadStandardOutput.connect(self.on_process_output)
+        self.process.finished.connect(self.on_gifsicle_finished)
+        self.process.errorOccurred.connect(self.on_gifsicle_error)
+        self.process.start(GIFSICLE_PATH, ["-b", "-O3", "--lossy=80", str(out_path)])
+
+    def on_gifsicle_finished(self, _exit_code, _exit_status):
+        # Best-effort: the ffmpeg-produced GIF is already valid and saved
+        # either way, so a gifsicle failure just means this one export
+        # missed the extra optimization pass, not that the export failed.
+        self.spinner_timer.stop()
+        self.process = None
+        self.run_next_export()
+
+    def on_gifsicle_error(self, _error):
+        self.spinner_timer.stop()
+        self.process = None
         self.run_next_export()
 
 

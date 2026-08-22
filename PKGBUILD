@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Quick drag-and-drop video trim/crop tool that preserves the source's modified date"
 arch=('any')
 license=('MIT')
-depends=('pyside6' 'ffmpeg')
+depends=('pyside6' 'ffmpeg' 'gifsicle')
 source=('clipcut' 'clipcut.desktop')
 sha256sums=('SKIP' 'SKIP')
 
