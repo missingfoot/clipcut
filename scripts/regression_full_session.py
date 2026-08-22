@@ -31,7 +31,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEventLoop, QPoint, QProcess, QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 clipcut = importlib.machinery.SourceFileLoader("clipcut", str(REPO_ROOT / "clipcut")).load_module()
@@ -146,14 +146,37 @@ def main():
     check("ordered_cut_indices() sorts by start time, not creation order",
           win.ordered_cut_indices() == [0, 2, 3, 1], str(win.ordered_cut_indices()))
 
-    # --- Important #6: cut list rows are distinct, showing "N: start-end" ---
+    # --- Important #6: cut list rows are distinct, showing a number + start-end,
+    # via a per-row widget (icon + fixed-width left-aligned number label + time
+    # label) rather than plain item text - real column alignment in the normal
+    # UI font, not a monospace hack ---
+    def row_labels(win, i):
+        """The QLabel children of row i's item widget, in build order:
+        [icon (no text), number, time-range]."""
+        widget = win.cut_list.itemWidget(win.cut_list.item(i))
+        return [w for w in widget.findChildren(QLabel)]
+
     win.refresh_cut_list()
-    row_texts = [win.cut_list.item(i).text() for i in range(win.cut_list.count())]
+    row_texts = ["".join(l.text() for l in row_labels(win, i)) for i in range(win.cut_list.count())]
     check("cut list rows are not all identical placeholder text",
           len(set(row_texts)) == len(row_texts), str(row_texts))
-    expected_row0 = f"1: {clipcut.format_time(0.0)}-{clipcut.format_time(6.0)}"
-    check("cut list row label matches 'N: start-end' format",
-          row_texts[0] == expected_row0, f"got {row_texts[0]!r} want {expected_row0!r}")
+    row0_labels = row_labels(win, 0)
+    check("cut list row widget has icon, number, and start-end labels",
+          len(row0_labels) == 3, str([l.text() for l in row0_labels]))
+    check("cut list row's number label reads '1' (no colon, no manual padding)",
+          row0_labels[1].text() == "1", row0_labels[1].text())
+    check("cut list row's time label shows the start-end range",
+          row0_labels[2].text() == f"{clipcut.format_time(0.0)}-{clipcut.format_time(6.0)}",
+          row0_labels[2].text())
+    check("cut list rows carry a real QIcon (not embedded in the text)",
+          isinstance(win.cut_row_icon, clipcut.QIcon))
+    # Whether the icon actually resolves to a picture depends on the desktop's
+    # icon theme (this offscreen test environment has none installed, so
+    # QIcon.fromTheme legitimately returns a null-but-valid QIcon here) -
+    # not asserted non-null; verified visually on a real desktop instead.
+    number_label_width = row0_labels[1].minimumWidth()
+    check("the number label reserves a fixed width, so 1/10/100 all left-align in the same column",
+          number_label_width > 0, str(number_label_width))
 
     # --- Important #7: editing the active cut's Start re-sorts/relabels the list
     # live, without a separate manual refresh ---
@@ -161,7 +184,7 @@ def main():
     win.write_start_field(0.2)  # now starts before cut index 2 (0.5s)
     check("ordered_cut_indices() reflects the just-edited start immediately",
           win.ordered_cut_indices() == [0, 1, 2, 3], str(win.ordered_cut_indices()))
-    reordered_texts = [win.cut_list.item(i).text() for i in range(win.cut_list.count())]
+    reordered_texts = ["".join(l.text() for l in row_labels(win, i)) for i in range(win.cut_list.count())]
     check("write_start_field's re-sort is visible in the cut list without an extra refresh_cut_list() call",
           reordered_texts != row_texts, str(reordered_texts))
 
@@ -186,6 +209,75 @@ def main():
     check("editing the crop fields writes the override onto the active cut",
           win.cuts[1].crop == (20, 10, 30, 15), str(win.cuts[1].crop))
 
+    # set_current_crop() is the real path a mouse-drag crop edit (or
+    # on_crop_field_edited) goes through - the crop icon must appear the
+    # instant it's called, with no extra reselect/toggle needed to see it.
+    # Same values as just set above, so this doesn't disturb the (20,10,30,15)
+    # override the rest of this section relies on.
+    win.set_current_crop(20, 10, 30, 15)
+    row1 = win.ordered_cut_indices().index(1)
+    check("the crop icon appears immediately from set_current_crop() alone, no reselect/toggle needed",
+          len(row_labels(win, row1)) == 4, str([l.text() for l in row_labels(win, row1)]))
+
+    # --- Applying an aspect-ratio preset with per-cut crop on must display its
+    # zero-valued edges the same way every other display path does (blank, not
+    # a literal "0") - otherwise they look like they vanish the next time
+    # anything redisplays the crop (toggling per-cut crop, reselecting the
+    # cut), even though the stored value was never actually wrong. Uses cut 3
+    # so it doesn't disturb cut 1's (20,10,30,15) override the rest of this
+    # section relies on. ---
+    win.select_cut(3)
+    sixteen_nine_index = win.aspect_combo.findText("16:9")
+    win.aspect_combo.setCurrentIndex(sixteen_nine_index)
+    win.on_aspect_ratio_selected(sixteen_nine_index)  # setCurrentIndex alone doesn't emit activated
+    check("applying a 16:9 preset with per-cut crop on writes the crop onto the active cut",
+          win.cuts[3].crop is not None, str(win.cuts[3].crop))
+    preset_crop = win.cuts[3].crop
+    check("320x240 source cropped to 16:9 has zero-valued left/right edges",
+          preset_crop[0] == 0 and preset_crop[2] == 0, str(preset_crop))
+    check("the preset's zero-valued edges display blank, not a literal '0'",
+          win.crop_left.text() == "" and win.crop_right.text() == "",
+          str([e.text() for e in win.crop_edits]))
+    check("preset's zero-valued edges render as ACTIVE guides, not the dim inactive color",
+          win.preview.guide_active["left"] and win.preview.guide_active["right"],
+          str(win.preview.guide_active))
+
+    # Switching to a different cut and back used to lose this: guide_active was
+    # recomputed purely from value > 0 on every redisplay (select_cut -> show_crop
+    # -> set_crop_pixels), so a preset's 0-valued edges went dim the moment you
+    # navigated away and back - not just on a toggle round-trip.
+    win.select_cut(1)
+    win.select_cut(3)
+    check("the preset's zero-valued guides are STILL active after switching cuts and back",
+          win.preview.guide_active["left"] and win.preview.guide_active["right"],
+          str(win.preview.guide_active))
+
+    # A real interaction that redisplays this crop via show_crop() (declining the
+    # turn-off confirmation - see the dedicated destructive-clear tests further
+    # down - just want a redisplay here) must not change the value or its display.
+    orig_question = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.No)
+    win.per_cut_crop_check.setChecked(False)
+    pump(20)
+    QMessageBox.question = orig_question
+    check("declining turn-off leaves the preset's crop and Per-Cut Crop itself untouched",
+          win.cuts[3].crop == preset_crop and win.per_cut_crop_check.isChecked(),
+          f"{win.cuts[3].crop} vs {preset_crop}, checked={win.per_cut_crop_check.isChecked()}")
+    check("...and its zero edges still display blank, not '0', after redisplay",
+          win.crop_left.text() == "" and win.crop_right.text() == "",
+          str([e.text() for e in win.crop_edits]))
+    check("...and its guides are still active after that redisplay too",
+          win.preview.guide_active["left"] and win.preview.guide_active["right"],
+          str(win.preview.guide_active))
+    none_index = win.aspect_combo.findText("None")
+    win.aspect_combo.setCurrentIndex(none_index)
+    win.on_aspect_ratio_selected(none_index)  # drop the aspect lock before continuing
+    win.preview.set_crop_pixels(5, 0, 0, 0)
+    check("without a preset engaged, only the nonzero edge is active (freeform per-edge behavior preserved)",
+          win.preview.guide_active == {"left": True, "top": False, "right": False, "bottom": False},
+          str(win.preview.guide_active))
+    win.select_cut(1)  # restore context for the rest of this section
+
     win.select_cut(2)
     check("a different cut with no override shows the shared crop, not cut 1's override",
           all(e.text() == "" for e in win.crop_edits), str([e.text() for e in win.crop_edits]))
@@ -203,33 +295,138 @@ def main():
     check("...and the reset survives the next sync_active_cut_from_widgets() (doesn't resurrect the old override)",
           win.cuts[1].crop in (None, (0, 0, 0, 0)), str(win.cuts[1].crop))
 
-    # Toggling OFF must restore shared_crop into the fields, and must NOT destroy
-    # a stored override; toggling back ON must restore that override untouched.
+    # Turning Per-Cut Crop OFF is now destructive - it clears every cut's crop
+    # override (not just the active one), guarded by a confirm dialog so it
+    # doesn't happen by accident. Declining leaves everything untouched;
+    # accepting actually clears and turns it off.
     win.cuts[1].crop = (7, 7, 7, 7)
+    win.cuts[2].crop = (3, 3, 3, 3)
     win.select_cut(2)
     win.select_cut(1)  # re-select to refresh fields from the override just set
+
+    orig_question = QMessageBox.question
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.No)
     win.per_cut_crop_check.setChecked(False)
     pump(20)
-    check("toggling per-cut crop OFF shows shared_crop in the fields immediately",
+    QMessageBox.question = orig_question
+    check("declining the turn-off confirmation leaves Per-Cut Crop checked",
+          win.per_cut_crop_check.isChecked() and win.per_cut_crop_enabled)
+    check("...and leaves every cut's override untouched",
+          win.cuts[1].crop == (7, 7, 7, 7) and win.cuts[2].crop == (3, 3, 3, 3),
+          f"{win.cuts[1].crop}, {win.cuts[2].crop}")
+
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.Yes)
+    win.per_cut_crop_check.setChecked(False)
+    pump(20)
+    QMessageBox.question = orig_question
+    check("accepting the turn-off confirmation actually turns Per-Cut Crop off",
+          not win.per_cut_crop_check.isChecked() and not win.per_cut_crop_enabled)
+    check("...and clears every cut's override, not just the one that was active",
+          all(c.crop is None for c in win.cuts), str(win.cuts))
+    check("turning per-cut crop off shows shared_crop in the fields",
           all(e.text() == "" for e in win.crop_edits), str([e.text() for e in win.crop_edits]))
-    check("toggling per-cut crop OFF does not destroy the stored override",
-          win.cuts[1].crop == (7, 7, 7, 7), str(win.cuts[1].crop))
+    win.refresh_cut_list()
+    row1 = win.ordered_cut_indices().index(1)
+    check("cut list hides the crop icon everywhere after every override was cleared",
+          len(row_labels(win, row1)) == 3, str([l.text() for l in row_labels(win, row1)]))
+
+    question_calls = []
+    QMessageBox.question = staticmethod(lambda *a, **kw: question_calls.append(a) or QMessageBox.Yes)
     win.per_cut_crop_check.setChecked(True)
     pump(20)
-    check("toggling per-cut crop back ON restores the override into the fields (not destroyed)",
-          tuple(int(e.text() or 0) for e in win.crop_edits) == (7, 7, 7, 7),
-          str([e.text() for e in win.crop_edits]))
-    check("...and the underlying cut.crop is unchanged by the toggle round-trip",
-          win.cuts[1].crop == (7, 7, 7, 7), str(win.cuts[1].crop))
+    QMessageBox.question = orig_question
+    check("turning per-cut crop back on (nothing left to lose) needs no confirmation",
+          not question_calls)
+
+    # Re-establish a non-uniform per-cut crop state (cut 1 differs from every
+    # other cut's shared_crop) for the Combined-export greying-out tests below,
+    # which the destructive clear above just wiped out.
+    win.cuts[1].crop = (7, 7, 7, 7)
+    # select_cut() re-syncs the crop_edits fields from this value - without it,
+    # the fields still show whatever was last displayed (blank, from the toggle
+    # above), and the next sync_active_cut_from_widgets() (do_process() calls it
+    # internally) would clobber cuts[1].crop right back from that stale text.
+    win.select_cut(1)
 
     # --- Minor #12: label renamed from the backwards "Sensitivity %" ---
     labels = [w.text() for w in win.findChildren(QLabel)]
     check("scene-detection field is labelled 'Threshold %', not the backwards 'Sensitivity %'",
           "Threshold %" in labels and "Sensitivity %" not in labels, str(labels))
 
+    # --- Cut tab layout tweaks: heading/helper text for scene detection, cut
+    # list has no artificial height cap, Add/Delete Cut come before the list ---
+    check("Cut tab has a 'Scene Detection' heading", "Scene Detection" in labels, str(labels))
+    check("cut list has no artificial max-height cap (fills available space)",
+          win.cut_list.maximumHeight() >= 16777215, str(win.cut_list.maximumHeight()))
+    def layout_index_containing(layout, widget):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is widget:
+                return i
+            sub = item.layout()
+            if sub is not None and any(sub.itemAt(j).widget() is widget for j in range(sub.count())):
+                return i
+        return None
+
+    cut_tab_layout = win.cut_list.parentWidget().layout()
+    buttons_index = layout_index_containing(cut_tab_layout, win.add_cut_button)
+    list_index = layout_index_containing(cut_tab_layout, win.cut_list)
+    check("Add/Delete Cut buttons sit above the cut list",
+          buttons_index is not None and list_index is not None and buttons_index < list_index,
+          f"buttons at {buttons_index}, list at {list_index}")
+
     # --- Minor #8: dead build_command() removed ---
     check("dead build_command() was removed",
           not hasattr(clipcut.MainWindow, "build_command"))
+
+    # --- Export tab replaces Audio tab: audio options, append-text, export mode,
+    # and Process all live there now; only status/progress stays in the sticky
+    # footer (visible from every tab); the Done button is gone entirely ---
+    tab_labels = [win.section_tabs.tabText(i) for i in range(win.section_tabs.count())]
+    check("tabs are Cut/Crop/Export - no separate Audio tab",
+          tab_labels == ["Cut", "Crop", "Export"], str(tab_labels))
+    export_tab_page = win.section_tabs.widget(tab_labels.index("Export"))
+
+    def is_descendant_of(widget, ancestor):
+        w = widget
+        while w is not None:
+            if w is ancestor:
+                return True
+            w = w.parentWidget()
+        return False
+
+    for name in ("remove_audio", "audio_only", "suffix_edit", "export_mode_separate",
+                 "export_mode_combined", "process_button"):
+        widget = getattr(win, name)
+        check(f"{name} lives inside the Export tab",
+              is_descendant_of(widget, export_tab_page))
+    check("status label stays in the sticky footer, outside the tab widget",
+          not is_descendant_of(win.status, win.section_tabs))
+    check("error_details_button stays in the sticky footer, outside the tab widget",
+          not is_descendant_of(win.error_details_button, win.section_tabs))
+    check("Done button was removed", not hasattr(win, "done_button"))
+    export_labels = [w.text() for w in export_tab_page.findChildren(QLabel)]
+    check("Export tab has an 'Audio' heading", "Audio" in export_labels, str(export_labels))
+
+    def find_direct_layout(root_layout, widget):
+        for i in range(root_layout.count()):
+            item = root_layout.itemAt(i)
+            if item.widget() is widget:
+                return root_layout
+            sub = item.layout()
+            if sub is not None:
+                found = find_direct_layout(sub, widget)
+                if found is not None:
+                    return found
+        return None
+
+    mode_layout = find_direct_layout(export_tab_page.layout(), win.export_mode_separate)
+    check("export mode radios are stacked vertically (separate lines), not side by side",
+          mode_layout is not None and isinstance(mode_layout, QVBoxLayout)
+          and mode_layout is not export_tab_page.layout(),
+          str(type(mode_layout)))
+    check("export mode has explanatory helper text",
+          any("Separate files:" in t for t in export_labels), str(export_labels))
 
     # --- Important #4: export builders iterate in chronological order, not
     # creation order - spy on build_ffmpeg_args to record the order cuts are
@@ -385,6 +582,8 @@ def main():
     ok = wait_until(lambda: win.scene_process is None, timeout_ms=30000)
     QMessageBox.question = orig_question
     check("scene detection completed", ok)
+    check("scene completion readout lands in the sticky status footer (visible from every tab)",
+          "Found" in win.status.text(), win.status.text())
     check("scene detection found the 3 distinct color scenes",
           len(win.cuts) == 3, f"found {len(win.cuts)} cuts: {win.cuts}")
     if len(win.cuts) == 3:
@@ -392,6 +591,158 @@ def main():
         check("scene boundaries land near the real 2s/4s cuts",
               abs(starts[1] - 2.0) < 0.5,
               str(starts))
+
+    # --- Merge/Delete via cut_list multi-select, and global (not per-cut)
+    # Frame/Keyframe mode switching: added for the "merge scenes" feature -
+    # cuts can no longer mix modes, so switching modes is now a destructive,
+    # confirm-before-replace, whole-list action (mirrors detect_scenes' guard) ---
+    win.load_file(fixture)
+    check("fresh reload starts with Delete/Keep/Merge all disabled (nothing selected)",
+          not win.delete_selected_button.isEnabled() and not win.keep_selected_button.isEnabled()
+          and not win.merge_selected_button.isEnabled())
+
+    win.write_end_field(1.5)
+    seek_and_add_cut(1.5)
+    win.write_end_field(3.0)
+    seek_and_add_cut(3.0)
+    win.write_end_field(4.5)
+    seek_and_add_cut(4.5)
+    check("built 4 contiguous cuts for merge/delete testing",
+          len(win.cuts) == 4 and win.ordered_cut_indices() == [0, 1, 2, 3], str(win.cuts))
+
+    def select_rows(rows):
+        win.cut_list.clearSelection()
+        for r in rows:
+            win.cut_list.item(r).setSelected(True)
+
+    select_rows([1])
+    check("single-row selection enables Delete and Keep",
+          win.delete_selected_button.isEnabled() and win.keep_selected_button.isEnabled())
+    check("single-row selection leaves Merge disabled (nothing to merge)",
+          not win.merge_selected_button.isEnabled())
+    check("single-row selection still drives the active cut, like before",
+          win.active_cut == 1, str(win.active_cut))
+
+    select_rows([0, 2])
+    check("non-contiguous multi-select (ctrl-click) enables Delete and Keep",
+          win.delete_selected_button.isEnabled() and win.keep_selected_button.isEnabled())
+    check("non-contiguous multi-select (ctrl-click) leaves Merge disabled",
+          not win.merge_selected_button.isEnabled())
+
+    select_rows([1, 2])
+    check("contiguous multi-select (shift-click) enables Delete, Keep, and Merge",
+          win.delete_selected_button.isEnabled() and win.keep_selected_button.isEnabled()
+          and win.merge_selected_button.isEnabled())
+
+    before = [(c.start_repr, c.end_repr) for c in win.cuts]
+    win.merge_selected_cuts()
+    check("merge reduced the cut count by one", len(win.cuts) == 3, str(win.cuts))
+    ordered = win.ordered_cut_indices()
+    merged_cut = win.cuts[ordered[1]]
+    check("merged cut spans from the first selected cut's start to the last's end",
+          merged_cut.start_repr == before[1][0] and merged_cut.end_repr == before[2][1],
+          f"merged={merged_cut} before={before}")
+
+    select_rows([0])
+    win.delete_selected_cuts()
+    check("delete removed exactly the one selected cut", len(win.cuts) == 2, str(win.cuts))
+
+    select_rows([0, 1])
+    win.delete_selected_cuts()
+    check("delete refuses to remove every remaining cut (at least one must survive)",
+          len(win.cuts) == 2, str(win.cuts))
+    check("selecting every cut also disables Keep (nothing outside the selection to discard)",
+          not win.keep_selected_button.isEnabled())
+    win.keep_selected_cuts()
+    check("keep refuses when the selection covers every cut", len(win.cuts) == 2, str(win.cuts))
+
+    select_rows([0])
+    check("partial selection enables Keep", win.keep_selected_button.isEnabled())
+    kept_cut = win.cuts[win.cut_list.item(0).data(Qt.UserRole)]
+    win.keep_selected_cuts()
+    check("keep discarded every cut except the selected one", len(win.cuts) == 1, str(win.cuts))
+    check("the surviving cut is the one that was selected, not just whichever remained",
+          win.cuts[0].start_repr == kept_cut.start_repr and win.cuts[0].end_repr == kept_cut.end_repr,
+          f"kept={win.cuts[0]} expected={kept_cut}")
+
+    # --- Deleting selects the row that shifts up into the gap, not row 0, so
+    # repeated Delete clicks walk down the list instead of jumping to the top ---
+    win.load_file(fixture)
+    win.write_end_field(1.5)
+    seek_and_add_cut(1.5)
+    win.write_end_field(3.0)
+    seek_and_add_cut(3.0)
+    win.write_end_field(4.5)
+    seek_and_add_cut(4.5)
+    check("built 4 fresh contiguous cuts for the walk-down test",
+          len(win.cuts) == 4, str(win.cuts))
+
+    select_rows([1])
+    third_cut_before = win.cuts[win.ordered_cut_indices()[2]]
+    win.delete_selected_cuts()
+    check("after deleting row 1, selection lands on what's now row 1 (the old row 2), not row 0",
+          win.cut_list.currentRow() == 1, str(win.cut_list.currentRow()))
+    check("...and it's genuinely the cut that used to be at row 2, shifted up",
+          win.cuts[win.active_cut].start_repr == third_cut_before.start_repr,
+          f"active={win.cuts[win.active_cut]} expected={third_cut_before}")
+
+    # It's already selected (delete's own reselection), so clicking Delete again
+    # immediately removes the next one in line - no need to reselect by hand.
+    win.delete_selected_cuts()
+    check("a second immediate delete removes another cut without reselecting first",
+          len(win.cuts) == 2, str(win.cuts))
+    check("selection still isn't stuck at row 0", win.cut_list.currentRow() == 1,
+          str(win.cut_list.currentRow()))
+
+    select_rows([1])
+    win.delete_selected_cuts()
+    check("deleting the last row falls back to the new last row, not row 0",
+          win.cut_list.currentRow() == len(win.cuts) - 1 == 0,
+          f"currentRow={win.cut_list.currentRow()} cuts={win.cuts}")
+
+    win.load_file(fixture)
+    orig_question = QMessageBox.question
+    question_calls = []
+
+    def spy_question(*a, **kw):
+        question_calls.append(a)
+        return QMessageBox.Yes
+
+    QMessageBox.question = staticmethod(spy_question)
+    win.cut_mode_keyframe.setChecked(True)
+    pump(20)
+    check("switching mode with only the trivial default cut needs no confirmation",
+          not question_calls)
+    check("...and converts in place rather than resetting to a blank cut",
+          win.frame_mode is False and len(win.cuts) == 1)
+    QMessageBox.question = orig_question
+
+    # Build a 2nd cut (still trivially, no confirmation needed for the 0->1 leg
+    # since a single customized cut still isn't "work" by has_work's rule) so
+    # the next switch has real work to lose.
+    win.write_end_field(2.0)
+    win.cut_mode_frame.setChecked(True)
+    pump(20)
+    seek_and_add_cut(1.0)
+    check("now have 2 cuts to make the next mode switch non-trivial",
+          len(win.cuts) == 2, str(win.cuts))
+
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.No)
+    win.cut_mode_keyframe.setChecked(True)
+    pump(20)
+    check("declining the mode-switch confirmation leaves the cut list untouched",
+          len(win.cuts) == 2 and win.frame_mode is True,
+          f"cuts={win.cuts} frame_mode={win.frame_mode}")
+    check("...and reverts the radio buttons to the mode actually in effect",
+          win.cut_mode_frame.isChecked() and not win.cut_mode_keyframe.isChecked())
+
+    QMessageBox.question = staticmethod(lambda *a, **kw: QMessageBox.Yes)
+    win.cut_mode_keyframe.setChecked(True)
+    pump(20)
+    check("accepting the mode-switch confirmation collapses the list to one cut in the new mode",
+          len(win.cuts) == 1 and win.frame_mode is False and win.cuts[0].frame_mode is False,
+          f"cuts={win.cuts} frame_mode={win.frame_mode}")
+    QMessageBox.question = orig_question
 
     # --- Minor #15: current_crop_target/set_current_crop don't crash with no
     # file loaded, and per_cut_crop_enabled resets symmetrically with load_file ---
