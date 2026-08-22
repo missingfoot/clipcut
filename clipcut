@@ -1124,8 +1124,10 @@ class Scrubber(QWidget):
         index, kind = self._handle_at(x)
         if kind == "body":
             self.segment_clicked.emit(index)
-            self._dragging = None
-            return
+            # Selection and seeking are not in conflict, and there's no other way
+            # to scrub within this widget - fall through to a playhead drag.
+            kind = "playhead"
+            index = None
         self._dragging = kind
         self._drag_segment = index
         self._drag_to(x)
@@ -1395,7 +1397,7 @@ class MainWindow(QMainWindow):
         self.detect_scenes_button.clicked.connect(self.detect_scenes)
         self.detect_scenes_button.setEnabled(False)
         scene_row = QHBoxLayout()
-        scene_row.addWidget(QLabel("Sensitivity %"))
+        scene_row.addWidget(QLabel("Threshold %"))
         scene_row.addWidget(self.scene_threshold_edit)
         scene_row.addWidget(self.detect_scenes_button)
         cut_tab_layout.addLayout(scene_row)
@@ -1624,6 +1626,9 @@ class MainWindow(QMainWindow):
         sidebar.addLayout(button_row)
 
         self.progress_percent = 0
+        self.export_total = 0
+        self.export_current = 0
+        self.spinner_label = "Working"
 
         status_row = QHBoxLayout()
         self.status = QLabel("")
@@ -1769,6 +1774,8 @@ class MainWindow(QMainWindow):
         self.cut_list.clear()
         self.active_cut = 0
         self.shared_crop = (0, 0, 0, 0)
+        self.per_cut_crop_enabled = False
+        self.per_cut_crop_check.setChecked(False)
         self.filename_label.setText("Drag and drop or choose a file")
         self.filename_label.setToolTip("")
         self.browse_button.setText("Browse...")
@@ -2080,6 +2087,7 @@ class MainWindow(QMainWindow):
         self.sync_active_cut_from_widgets()
         self.refresh_timeline_cuts()
         self._syncing = False
+        self.refresh_cut_list()
 
     def on_frame_fields_changed(self):
         fps = self.video_fps or 30.0
@@ -2097,6 +2105,7 @@ class MainWindow(QMainWindow):
         self.sync_active_cut_from_widgets()
         self.refresh_timeline_cuts()
         self._syncing = False
+        self.refresh_cut_list()
 
     def write_start_field(self, seconds):
         """Write a Start value, but leave the field blank instead of a literal "0" when
@@ -2111,6 +2120,7 @@ class MainWindow(QMainWindow):
             self.start_keyframe_edit.setText("" if idx <= 0 else str(idx))
         self.sync_active_cut_from_widgets()
         self.refresh_timeline_cuts()
+        self.refresh_cut_list()
 
     def write_end_field(self, seconds):
         """Write an End value, but leave the field blank instead of a concrete number
@@ -2123,6 +2133,7 @@ class MainWindow(QMainWindow):
             self.end_keyframe_edit.setText("" if at_end else str(self.keyframe_index_of(seconds)))
         self.sync_active_cut_from_widgets()
         self.refresh_timeline_cuts()
+        self.refresh_cut_list()
 
     def on_cut_mode_changed(self, is_frame):
         if self._syncing:
@@ -2160,12 +2171,21 @@ class MainWindow(QMainWindow):
             return cut.start_repr / (self.video_fps or 30.0)
         return self.keyframe_time(cut.start_repr)
 
+    def ordered_cut_indices(self):
+        """Indices into self.cuts in start-time (chronological) order - the order
+        the cut list UI shows, used here and by both export builders so there is
+        one definition of "cut order," not two (creation order vs. chronological)
+        that can silently disagree."""
+        return sorted(range(len(self.cuts)), key=lambda i: self.cut_start_seconds(self.cuts[i]))
+
     def refresh_cut_list(self):
         was_blocked = self.cut_list.blockSignals(True)
         self.cut_list.clear()
-        ordered = sorted(range(len(self.cuts)), key=lambda i: self.cut_start_seconds(self.cuts[i]))
+        ordered = self.ordered_cut_indices()
         for row, cut_index in enumerate(ordered):
-            self.cut_list.addItem(f"{row + 1}: cut")
+            cut = self.cuts[cut_index]
+            start, end = self.trim_seconds_for_cut(cut)
+            self.cut_list.addItem(f"{row + 1}: {format_time(start)}-{format_time(end)}")
             self.cut_list.item(row).setData(Qt.UserRole, cut_index)
             if cut_index == self.active_cut:
                 self.cut_list.setCurrentRow(row)
@@ -2184,14 +2204,19 @@ class MainWindow(QMainWindow):
         cut.end_repr = int(end_edit.text()) if end_edit.text() else None
         if self.per_cut_crop_enabled:
             texts = [e.text() for e in self.crop_edits]
-            if any(texts):
-                cut.crop = tuple(int(t) if t else 0 for t in texts)
+            cut.crop = tuple(int(t) if t else 0 for t in texts)
 
     def add_cut(self):
         if not self.path:
             return
         self.sync_active_cut_from_widgets()
-        self.cuts.append(Cut(frame_mode=self.frame_mode))
+        pos = self.current_position()
+        if self.frame_mode:
+            fps = self.video_fps or 30.0
+            start_repr = round(pos * fps)
+        else:
+            start_repr = self.keyframe_index_of(pos)
+        self.cuts.append(Cut(start_repr=start_repr, frame_mode=self.frame_mode))
         self.select_cut(len(self.cuts) - 1)
         self.refresh_cut_list()
 
@@ -2230,10 +2255,23 @@ class MainWindow(QMainWindow):
         data = bytes(self.scene_process.readAllStandardOutput()).decode(errors="replace")
         self.scene_detect_output += data
 
-    def on_scene_detect_finished(self, _exit_code, _exit_status):
+    def on_scene_detect_finished(self, exit_code, _exit_status):
+        output = self.scene_detect_output
+        self.scene_process = None
+        # File may have been removed (remove_file already disabled the button and
+        # cleared self.duration) while detection was running - nothing sensible to
+        # do with a result for a file that's no longer loaded, and self.duration
+        # being None would blow up the `t < self.duration` comparison below.
+        if not self.path or not self.duration:
+            self.detect_scenes_button.setEnabled(bool(self.path))
+            return
         self.detect_scenes_button.setEnabled(True)
+        if exit_code != 0:
+            self.report_error("Scene detection failed", output)
+            return
+
         times = []
-        for line in self.scene_detect_output.splitlines():
+        for line in output.splitlines():
             marker = "pts_time:"
             if marker in line:
                 chunk = line.split(marker, 1)[1].split()[0]
@@ -2241,7 +2279,6 @@ class MainWindow(QMainWindow):
                     times.append(float(chunk))
                 except ValueError:
                     pass
-        self.scene_process = None
         if not times:
             self.status.setText("No scene changes detected")
             return
@@ -2292,18 +2329,32 @@ class MainWindow(QMainWindow):
         end_edit = self.end_frame_edit if cut.frame_mode else self.end_keyframe_edit
         start_edit.setText(str(cut.start_repr) if cut.start_repr else "")
         end_edit.setText(str(cut.end_repr) if cut.end_repr is not None else "")
+        self._syncing = False
         if self.per_cut_crop_enabled:
             crop = cut.crop if cut.crop is not None else self.shared_crop
-            for edit, value in zip(self.crop_edits, crop):
-                edit.setText(str(value) if value else "")
-            self.preview.set_crop_pixels(*crop)
-        self._syncing = False
-        self.update_crop_size_fields()
+            self.show_crop(crop)
+        else:
+            self.update_crop_size_fields()
         self.update_suffix_placeholder()
         self.refresh_timeline_cuts()
 
+    def show_crop(self, crop):
+        """Push a resolved (left, top, right, bottom) crop into the crop text
+        fields, the preview overlay, and the Size/Position fields - the single
+        sync point for *displaying* a crop (as opposed to editing one), shared by
+        select_cut, on_per_cut_crop_toggled, and reset_cut_crop. get_crop() reads
+        crop_edits as the source of truth, so any path that changes which crop is
+        on screen must go through here or the fields silently go stale."""
+        was_syncing = self._syncing
+        self._syncing = True
+        for edit, value in zip(self.crop_edits, crop):
+            edit.setText(str(value) if value else "")
+        self._syncing = was_syncing
+        self.preview.set_crop_pixels(*crop)
+        self.update_crop_size_fields()
+
     def current_crop_target(self):
-        if not self.per_cut_crop_enabled:
+        if not self.per_cut_crop_enabled or not self.cuts:
             return self.shared_crop
         cut = self.cuts[self.active_cut]
         if cut.crop is None:
@@ -2311,7 +2362,7 @@ class MainWindow(QMainWindow):
         return cut.crop
 
     def set_current_crop(self, left, top, right, bottom):
-        if self.per_cut_crop_enabled:
+        if self.per_cut_crop_enabled and self.cuts:
             self.cuts[self.active_cut].crop = (left, top, right, bottom)
         else:
             self.shared_crop = (left, top, right, bottom)
@@ -2328,16 +2379,16 @@ class MainWindow(QMainWindow):
                 crop = cut.crop if cut.crop is not None else self.shared_crop
             else:
                 crop = self.shared_crop
-            self.preview.set_crop_pixels(*crop)
-            self.update_crop_size_fields()
+            self.show_crop(crop)
 
     def reset_cut_crop(self):
         if not self.per_cut_crop_enabled or not self.cuts:
             return
         self.cuts[self.active_cut].crop = None
-        crop = self.current_crop_target()
-        self.preview.set_crop_pixels(*crop)
-        self.update_crop_size_fields()
+        # Read-only resolution, not current_crop_target() - that helper re-seeds
+        # cut.crop = self.shared_crop on read, which would immediately undo the
+        # None we just set above.
+        self.show_crop(self.shared_crop)
 
     def trim_seconds_for_cut(self, cut):
         """Resolve a Cut's start/end to seconds without touching any live widget -
@@ -2383,6 +2434,7 @@ class MainWindow(QMainWindow):
             self.start_keyframe_edit.setText(str(self.keyframe_index_of(start)))
             self.end_keyframe_edit.setText(str(self.keyframe_index_of(end)))
         self.refresh_timeline_cuts()
+        self.refresh_cut_list()
 
     def keyframe_time(self, idx):
         if not self.keyframe_times:
@@ -2581,7 +2633,8 @@ class MainWindow(QMainWindow):
     def build_ffmpeg_args(self, out_path):
         """Return (cmd, target_duration) for the currently-active cut's trim/crop/
         audio settings, writing to the given out_path. Raises ValueError on bad
-        input. Path-agnostic core of build_command, reused by multi-cut export."""
+        input. Path-agnostic, reused by every export path (single, per-cut,
+        combined)."""
         start, end = self.get_trim_times()
         target_duration = end - start
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
@@ -2602,21 +2655,10 @@ class MainWindow(QMainWindow):
         cmd.append(str(out_path))
         return cmd, target_duration
 
-    def build_command(self):
-        """Return (cmd, out_path, target_duration) using the default single-export
-        output path. Raises ValueError on bad input."""
-        append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
-        if self.audio_only.isChecked():
-            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}.m4a"))
-        else:
-            out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{self.path.suffix}"))
-        cmd, target_duration = self.build_ffmpeg_args(out_path)
-        return cmd, out_path, target_duration
-
     def advance_spinner(self):
         frame = self.spinner_frames[self.spinner_index]
         self.spinner_index = (self.spinner_index + 1) % len(self.spinner_frames)
-        self.status.setText(f"{frame} Working... {self.progress_percent}%")
+        self.status.setText(f"{frame} {self.spinner_label}... {self.progress_percent}%")
 
     def on_process_output(self):
         if self.progress_target_duration <= 0:
@@ -2641,13 +2683,13 @@ class MainWindow(QMainWindow):
             saved_active = self.active_cut
             append_text = self.suffix_edit.text().strip() or self.compute_default_suffix()
             queue = []
-            for i, cut in enumerate(self.cuts):
-                self.select_cut(i)
+            for row, cut_index in enumerate(self.ordered_cut_indices()):
+                self.select_cut(cut_index)
                 if self.audio_only.isChecked():
                     ext = ".m4a"
                 else:
                     ext = self.path.suffix
-                suffix = f"{append_text}_{i + 1}" if len(self.cuts) > 1 else append_text
+                suffix = f"{append_text}_{row + 1}" if len(self.cuts) > 1 else append_text
                 out_path = next_available(self.path.with_name(f"{self.path.stem}_{suffix}{ext}"))
                 cmd, target_duration = self.build_ffmpeg_args(out_path)
                 queue.append((cmd, out_path, target_duration))
@@ -2659,6 +2701,7 @@ class MainWindow(QMainWindow):
 
         self.export_queue = queue
         self.export_total = len(queue)
+        self.export_current = 0
         self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
         self.run_next_export()
@@ -2671,10 +2714,10 @@ class MainWindow(QMainWindow):
             queue = []
             crops = []
             audio_only = self.audio_only.isChecked()
-            for i, cut in enumerate(self.cuts):
-                self.select_cut(i)
+            for row, cut_index in enumerate(self.ordered_cut_indices()):
+                self.select_cut(cut_index)
                 ext = ".m4a" if audio_only else self.path.suffix
-                tmp_path = tmp_dir / f"part_{i + 1}{ext}"
+                tmp_path = tmp_dir / f"part_{row + 1}{ext}"
                 cmd, target_duration = self.build_ffmpeg_args(tmp_path)
                 queue.append((cmd, tmp_path, target_duration))
                 if not audio_only:
@@ -2697,6 +2740,8 @@ class MainWindow(QMainWindow):
             target_h = max(c[1] for c in crops)
             self.combined_target_size = (target_w + target_w % 2, target_h + target_h % 2)
         self.export_queue = queue
+        self.export_total = len(queue)
+        self.export_current = 0
         self.export_is_combined = True
         self.error_details_button.setVisible(False)
         self.process_button.setEnabled(False)
@@ -2723,13 +2768,29 @@ class MainWindow(QMainWindow):
                 f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]"
                 for i in range(n)
             ]
-            concat_inputs = "".join(f"[v{i}][{i}:a:0]" for i in range(n))
-            filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
-            cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[v]", "-map", "[a]", str(out_path)]
+            no_audio = self.remove_audio.isChecked()
+            if no_audio:
+                # Parts were exported with -an (build_ffmpeg_args), so there is no
+                # audio stream to concat - unconditionally demanding [i:a:0] from
+                # every input, as the a=1 branch below does, aborts ffmpeg.
+                concat_inputs = "".join(f"[v{i}]" for i in range(n))
+                filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=0[v]"
+                maps = ["-map", "[v]"]
+            else:
+                concat_inputs = "".join(f"[v{i}][{i}:a:0]" for i in range(n))
+                filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
+                maps = ["-map", "[v]", "-map", "[a]"]
+            cmd = (["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str] + maps +
+                   ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast", str(out_path)])
 
         self.pending_out_path = out_path
         self.export_is_combined = False  # concat's own finish should behave like a normal single completion
         self.progress_target_duration = 0
+        self.progress_percent = 0
+        self.spinner_index = 0
+        self.spinner_label = "Joining"
+        self.advance_spinner()
+        self.spinner_timer.start()  # the preceding per-part on_process_finished stopped it
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.on_process_output)
         self.process.finished.connect(self.on_concat_finished)
@@ -2737,7 +2798,7 @@ class MainWindow(QMainWindow):
         self.process.start(cmd[0], cmd[1:])
 
     def on_concat_finished(self, exit_code, exit_status):
-        shutil.rmtree(self.combined_tmp_dir, ignore_errors=True)
+        self.cleanup_combined_tmp_dir()
         self.on_process_finished(exit_code, exit_status)
 
     def run_next_export(self):
@@ -2755,6 +2816,9 @@ class MainWindow(QMainWindow):
         self.progress_buffer = ""
         self.progress_percent = 0
         self.spinner_index = 0
+        self.export_current += 1
+        self.spinner_label = (f"Exporting {self.export_current} of {self.export_total}"
+                               if self.export_total > 1 else "Working")
         self.advance_spinner()
         self.spinner_timer.start()
 
@@ -2782,11 +2846,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(close_button)
         dialog.exec()
 
+    def cleanup_combined_tmp_dir(self):
+        """Remove the combined-export scratch dir, if one is in flight, so a
+        failed combined export (per-cut part failure, or ffmpeg failing to
+        launch) doesn't leave a clipcut_* temp directory full of video parts
+        behind permanently. Safe to call unconditionally - cleared after use so
+        a later unrelated export doesn't try to clean it again."""
+        tmp_dir = getattr(self, "combined_tmp_dir", None)
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            self.combined_tmp_dir = None
+
     def on_process_error(self, _error):
         self.spinner_timer.stop()
         self.process_button.setEnabled(True)
         self.report_error("Failed to launch ffmpeg", self.process.errorString())
         self.process = None
+        self.export_queue = []
+        self.cleanup_combined_tmp_dir()
 
     def on_process_finished(self, exit_code, _exit_status):
         self.spinner_timer.stop()
@@ -2797,6 +2874,7 @@ class MainWindow(QMainWindow):
             self.process_button.setEnabled(True)
             self.report_error("ffmpeg failed", stderr)
             self.export_queue = []
+            self.cleanup_combined_tmp_dir()
             return
 
         out_path = self.pending_out_path
