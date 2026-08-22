@@ -3,13 +3,14 @@
 
 Exercises the cross-widget interactions that unit-style per-task verification
 scripts didn't cover and that the 2026-08-21 final whole-branch review caught:
-cut creation out of chronological order, per-cut crop toggle/edit/reset,
-both export modes (including a differing-crops + remove-audio combined
-export), and scene detection. This is the regression test recommended at the
-end of .superpowers/sdd/2026-08-21-multi-cut-lists/final-review-findings.md,
-written to specifically catch Critical #1 (scrubber click-to-seek dead on a
-fresh load) and Critical #2 (per-cut crop toggle/reset not syncing the crop
-text fields, the actual export source of truth), plus Important #3-#7.
+cut creation out of chronological order, per-cut crop toggle/edit/reset, both
+export modes (including that Combined file export greys itself out whenever
+cuts disagree on crop, and a uniform-crop + remove-audio combined export),
+and scene detection. This is the regression test recommended at the end of
+.superpowers/sdd/2026-08-21-multi-cut-lists/final-review-findings.md, written
+to specifically catch Critical #1 (scrubber click-to-seek dead on a fresh
+load) and Critical #2 (per-cut crop toggle/reset not syncing the crop text
+fields, the actual export source of truth), plus Important #3-#7.
 
 Run from the repo root:
 
@@ -259,10 +260,42 @@ def main():
         p.unlink(missing_ok=True)
     processed_order.clear()
 
-    # --- Important #3 + #16, Minor #9/#10: combined export with DIFFERING crops
-    # (cut 1 has a (7,7,7,7) override, others don't - forces the concat-filter
-    # path) AND "Remove audio" checked (forces the a=0 branch that used to
-    # hard-fail ffmpeg on every combined export with no audio to concat) ---
+    # --- Simplification: Combined File export is disabled (greyed out) rather
+    # than falling back to a re-encoding concat filter whenever cuts disagree on
+    # crop. Cut 1 still carries the (7,7,7,7) override from the crop-sync checks
+    # above, which differs from every other cut's shared_crop (0,0,0,0) - a
+    # deliberately non-uniform state. ---
+    win.export_mode_separate.setChecked(True)
+    win.update_combined_export_availability()
+    check("Combined file export is disabled while any cut's crop differs from the rest",
+          not win.export_mode_combined.isEnabled())
+    check("...and carries an explanatory tooltip",
+          bool(win.export_mode_combined.toolTip()))
+
+    win.export_mode_combined.setChecked(True)  # force it, bypassing the greyed-out UI
+    win.update_combined_export_availability()
+    check("re-checking availability with Combined still (force-)checked falls back to Separate",
+          win.export_mode_separate.isChecked() and not win.export_mode_combined.isChecked())
+
+    win.export_mode_combined.setEnabled(True)  # simulate a stale/forced click despite the gate
+    win.export_mode_combined.setChecked(True)
+    win.do_process_combined()
+    check("do_process_combined() itself refuses non-uniform crops as a defensive backstop",
+          "requires every cut to use the same crop" in win.status.text(), win.status.text())
+    check("...and never touched ffmpeg (no queue was built)",
+          not getattr(win, "export_queue", None))
+
+    # Bring crops back into agreement so Combined becomes available again.
+    win.select_cut(1)
+    win.reset_cut_crop()
+    win.update_combined_export_availability()
+    check("Combined file export re-enables once every cut's crop agrees again",
+          win.export_mode_combined.isEnabled())
+
+    # --- Important #3, #4, #5, #9/#10: a real combined export with uniform crops
+    # (the only case Combined now supports) + "Remove audio" (forces the a=0
+    # branch that used to hard-fail ffmpeg when the concat filter existed; the
+    # demuxer's plain -c copy has never had this problem, but keep covering it) ---
     captured_cmds = []
     orig_qprocess_start = QProcess.start
 
@@ -286,7 +319,7 @@ def main():
     win.do_process()
     ok = wait_until(lambda: win.process_button.isEnabled(), timeout_ms=60000)
     clipcut.MainWindow.advance_spinner = orig_advance_spinner
-    check("combined export with differing crops + remove-audio completed (Important #3)",
+    check("combined export with uniform crops + remove-audio completed (Important #3)",
           ok, win.status.text() + " | " + (win.error_details if hasattr(win, "error_details") else ""))
     check("combined export processed cuts in chronological order",
           processed_order == expected_export_order, f"{processed_order} != {expected_export_order}")
@@ -294,15 +327,10 @@ def main():
           any(lbl.startswith("Exporting ") for lbl in spinner_labels_seen), str(set(spinner_labels_seen)))
     check("spinner showed a 'Joining' phase during the concat pass (Minor #9)",
           "Joining" in spinner_labels_seen, str(set(spinner_labels_seen)))
-    concat_cmd = next((c for c in captured_cmds if "-filter_complex" in c[1]), None)
-    check("combined export used the differing-crops filter path (not the stream-copy fast path)",
-          concat_cmd is not None, str([c[0] for c in captured_cmds]))
-    if concat_cmd is not None:
-        argv = concat_cmd[1]
-        check("filter-path concat did not demand an audio stream that doesn't exist (Important #3)",
-              "a=0" in "".join(argv) and "[a]" not in argv, str(argv))
-        check("filter-path concat re-encodes at the same quality as every other path (Minor #16)",
-              "-crf" in argv and "17" in argv and "veryfast" in argv, str(argv))
+    concat_cmd = next((c for c in captured_cmds if "concat" in c[1]), None)
+    check("combined export used the fast stream-copy demuxer path (no re-encode)",
+          concat_cmd is not None and "-filter_complex" not in concat_cmd[1] and "copy" in concat_cmd[1],
+          str([c[1] for c in captured_cmds]))
     combined_out = sorted(Path(tmp_dir).glob("scene_fixture_combined.mp4"))
     check("combined export produced a single output file", len(combined_out) == 1, str(combined_out))
     for p in combined_out:

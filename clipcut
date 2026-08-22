@@ -1825,6 +1825,7 @@ class MainWindow(QMainWindow):
         self.detect_scenes_button.setEnabled(False)
         self.status.setText("")
         self.update_suffix_placeholder()
+        self.update_combined_export_availability()
 
         self.preview.unload()
         self.scrubber.set_duration(0)
@@ -2192,6 +2193,36 @@ class MainWindow(QMainWindow):
         self.cut_list.blockSignals(was_blocked)
         self.delete_cut_button.setEnabled(len(self.cuts) > 1)
         self.refresh_timeline_cuts()
+        self.update_combined_export_availability()
+
+    def crops_are_uniform(self):
+        """Whether every cut would export with the same crop and codec path.
+        Combined-file export only supports the fast stream-copy concat demuxer,
+        which requires every part to be pixel-identical - so this gates whether
+        Combined is even offered, rather than falling back to a re-encoding
+        concat filter for mismatched crops."""
+        if len(self.cuts) <= 1:
+            return True
+        resolved = set()
+        frame_modes = set()
+        for cut in self.cuts:
+            if self.per_cut_crop_enabled and cut.crop is not None:
+                left, top, right, bottom = cut.crop
+            else:
+                left, top, right, bottom = self.shared_crop
+            crop_w = (self.video_width or 0) - left - right
+            crop_h = (self.video_height or 0) - top - bottom
+            resolved.add((left, top, crop_w, crop_h))
+            frame_modes.add(cut.frame_mode)
+        return len(resolved) <= 1 and len(frame_modes) <= 1
+
+    def update_combined_export_availability(self):
+        enabled = bool(self.path) and self.crops_are_uniform()
+        self.export_mode_combined.setEnabled(enabled)
+        self.export_mode_combined.setToolTip(
+            "" if enabled else "Combined file export requires every cut to use the same crop.")
+        if not enabled and self.export_mode_combined.isChecked():
+            self.export_mode_separate.setChecked(True)
 
     def sync_active_cut_from_widgets(self):
         if not self.cuts:
@@ -2366,6 +2397,7 @@ class MainWindow(QMainWindow):
             self.cuts[self.active_cut].crop = (left, top, right, bottom)
         else:
             self.shared_crop = (left, top, right, bottom)
+        self.update_combined_export_availability()
 
     def on_per_cut_crop_toggled(self, enabled):
         self.per_cut_crop_enabled = enabled
@@ -2380,6 +2412,7 @@ class MainWindow(QMainWindow):
             else:
                 crop = self.shared_crop
             self.show_crop(crop)
+        self.update_combined_export_availability()
 
     def reset_cut_crop(self):
         if not self.per_cut_crop_enabled or not self.cuts:
@@ -2389,6 +2422,7 @@ class MainWindow(QMainWindow):
         # cut.crop = self.shared_crop on read, which would immediately undo the
         # None we just set above.
         self.show_crop(self.shared_crop)
+        self.update_combined_export_availability()
 
     def trim_seconds_for_cut(self, cut):
         """Resolve a Cut's start/end to seconds without touching any live widget -
@@ -2707,12 +2741,18 @@ class MainWindow(QMainWindow):
         self.run_next_export()
 
     def do_process_combined(self):
+        if not self.crops_are_uniform():
+            # Belt-and-suspenders: the Combined radio is disabled whenever crops
+            # differ (update_combined_export_availability), so this shouldn't be
+            # reachable, but never silently build a nonsensical combined file.
+            self.status.setText("Combined export requires every cut to use the same crop")
+            self.error_details_button.setVisible(False)
+            return
         try:
             self.sync_active_cut_from_widgets()
             saved_active = self.active_cut
             tmp_dir = Path(tempfile.mkdtemp(prefix="clipcut_"))
             queue = []
-            crops = []
             audio_only = self.audio_only.isChecked()
             for row, cut_index in enumerate(self.ordered_cut_indices()):
                 self.select_cut(cut_index)
@@ -2720,9 +2760,6 @@ class MainWindow(QMainWindow):
                 tmp_path = tmp_dir / f"part_{row + 1}{ext}"
                 cmd, target_duration = self.build_ffmpeg_args(tmp_path)
                 queue.append((cmd, tmp_path, target_duration))
-                if not audio_only:
-                    crop_w, crop_h = self.get_crop()[2:4]
-                    crops.append((crop_w, crop_h))
             self.select_cut(saved_active)
         except ValueError as e:
             self.status.setText(f"Invalid input: {e}")
@@ -2730,15 +2767,6 @@ class MainWindow(QMainWindow):
             return
 
         self.combined_tmp_dir = tmp_dir
-        if audio_only:
-            self.combined_uniform = True
-            self.combined_target_size = (self.video_width, self.video_height)
-        else:
-            self.combined_uniform = len(set(crops)) <= 1 and (
-                len(self.cuts) == 1 or all(c.frame_mode == self.cuts[0].frame_mode for c in self.cuts))
-            target_w = max(c[0] for c in crops)
-            target_h = max(c[1] for c in crops)
-            self.combined_target_size = (target_w + target_w % 2, target_h + target_h % 2)
         self.export_queue = queue
         self.export_total = len(queue)
         self.export_current = 0
@@ -2753,35 +2781,9 @@ class MainWindow(QMainWindow):
         ext = ".m4a" if self.audio_only.isChecked() else self.path.suffix
         out_path = next_available(self.path.with_name(f"{self.path.stem}_{append_text}{ext}"))
 
-        if self.combined_uniform:
-            list_path = self.combined_tmp_dir / "list.txt"
-            list_path.write_text("".join(f"file '{p}'\n" for p in parts))
-            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(out_path)]
-        else:
-            inputs = []
-            for p in parts:
-                inputs += ["-i", str(p)]
-            n = len(parts)
-            tw, th = self.combined_target_size
-            scale_parts = [
-                f"[{i}:v:0]scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]"
-                for i in range(n)
-            ]
-            no_audio = self.remove_audio.isChecked()
-            if no_audio:
-                # Parts were exported with -an (build_ffmpeg_args), so there is no
-                # audio stream to concat - unconditionally demanding [i:a:0] from
-                # every input, as the a=1 branch below does, aborts ffmpeg.
-                concat_inputs = "".join(f"[v{i}]" for i in range(n))
-                filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=0[v]"
-                maps = ["-map", "[v]"]
-            else:
-                concat_inputs = "".join(f"[v{i}][{i}:a:0]" for i in range(n))
-                filter_str = ";".join(scale_parts) + ";" + concat_inputs + f"concat=n={n}:v=1:a=1[v][a]"
-                maps = ["-map", "[v]", "-map", "[a]"]
-            cmd = (["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str] + maps +
-                   ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast", str(out_path)])
+        list_path = self.combined_tmp_dir / "list.txt"
+        list_path.write_text("".join(f"file '{p}'\n" for p in parts))
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(out_path)]
 
         self.pending_out_path = out_path
         self.export_is_combined = False  # concat's own finish should behave like a normal single completion

@@ -130,17 +130,22 @@ already-async `QProcess` runs one after another (matching how a single
 export already reports progress/status - just N of them back to back).
 
 **Combined file**: export each cut to a temp file exactly as in separate
-mode, then join them:
-- If every cut used the identical crop (all `None`/shared, or per-cut but
-  numerically equal) and identical mode/codec path (all keyframe-mode
-  stream-copy, or all re-encoded), use ffmpeg's concat *demuxer* (fast,
-  no re-encode) - list the temp files in a concat script and run
-  `ffmpeg -f concat -safe 0 -i list.txt -c copy out.mp4`.
-- Otherwise (crops differ between cuts, or codecs/resolutions would
-  mismatch) fall back to the concat *filter* (`concat=n=N:v=1:a=1`),
-  which re-encodes but handles heterogeneous inputs correctly.
-- Clean up temp files after the combined output is written (success or
-  failure).
+mode, then join them with ffmpeg's concat *demuxer* (fast, no re-encode) -
+list the temp files in a concat script and run
+`ffmpeg -f concat -safe 0 -i list.txt -c copy out.mp4`. Clean up temp files
+after the combined output is written (success or failure).
+
+This only works when every cut resolves to the identical crop (all `None`/
+shared, or per-cut but numerically equal) and identical mode/codec path (all
+keyframe-mode stream-copy, or all re-encoded) - the demuxer requires every
+part to be pixel-identical. Rather than falling back to a re-encoding concat
+filter for mismatched crops (more code, a lossy re-encode, and a canvas-size/
+letterboxing decision to make on the user's behalf), Combined file export is
+simply disabled (greyed out, with an explanatory tooltip) whenever the
+current cuts don't all agree on crop, and re-enables automatically once they
+do again (crop edited/reset, per-cut crop toggled off, cuts added/removed).
+`do_process_combined` itself also refuses non-uniform crops defensively, in
+case that gate is ever bypassed.
 
 ## Backward compatibility
 
@@ -161,6 +166,7 @@ matching the established pattern for prior features in this codebase:
 - Run scene detection on a clip with several real scene changes, confirm
   the list replaces correctly and the confirm-before-replace fires when
   expected.
-- Export in both Separate and Combined modes; for Combined, verify both
-  the concat-demuxer fast path (uniform crop/mode) and the concat-filter
-  fallback (differing per-cut crops) produce a correctly joined output.
+- Export in both Separate and Combined modes; for Combined, verify the
+  concat-demuxer path produces a correctly joined output, and that the
+  Combined option greys out (with cuts left untouched) whenever cuts
+  disagree on crop.
