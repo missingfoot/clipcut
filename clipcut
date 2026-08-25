@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """ClipCut launcher.
 
-Thin entry point - the application itself lives in src/clipcutlib/ (dev
-checkout) or /usr/lib/clipcut/clipcutlib/ (installed package, see PKGBUILD).
-This file's only job is to locate that package on sys.path and hand off to
-it, then re-export the handful of names scripts/regression_full_session.py
-loads directly off this file via SourceFileLoader (which registers this
-file itself as sys.modules["clipcut"] - the package is deliberately named
+Thin entry point - the application itself lives in clipcutlib/ next to this
+script (dev checkout) or /usr/lib/clipcut/ (installed package, see
+PKGBUILD). Deliberately NOT under a src/ subdirectory here - that collided
+with makepkg's own default build-staging directory (also named src/),
+which meant `makepkg` would litter this package's actual source tree with
+its extracted source= symlinks on every build. This file's only job is to
+locate the clipcutlib package on sys.path and hand off to it, then
+re-export the handful of names scripts/regression_full_session.py loads
+directly off this file via SourceFileLoader (which registers this file
+itself as sys.modules["clipcut"] - the package is deliberately named
 clipcutlib, not clipcut, to avoid colliding with that)."""
 
 import sys
 from pathlib import Path
 
 _here = Path(__file__).resolve().parent
-for _candidate in (_here / "src", Path("/usr/lib/clipcut")):
+for _candidate in (_here, Path("/usr/lib/clipcut")):
     if (_candidate / "clipcutlib" / "__init__.py").exists():
         sys.path.insert(0, str(_candidate))
         break
 else:
     raise ImportError("Could not locate the clipcutlib package (looked in "
-                       f"{_here / 'src'} and /usr/lib/clipcut)")
+                       f"{_here} and /usr/lib/clipcut)")
 
 from clipcutlib.main_window import MainWindow  # noqa: F401  (re-exported for regression script/tooling)
 from clipcutlib.utils import format_time  # noqa: F401  (re-exported for regression script)
