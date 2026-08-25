@@ -67,6 +67,34 @@ def probe(path):
     return int(stream["width"]), int(stream["height"]), duration, fps
 
 
+AUDIO_CODEC_EXT = {
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "aac": ".m4a",
+    "alac": ".m4a",
+    "mp3": ".mp3",
+    "flac": ".flac",
+}
+
+
+def probe_audio_codec(path):
+    """Source audio codec name (e.g. 'opus', 'aac'), or None if no audio stream / probe failure."""
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "json",
+            str(path),
+        ],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return None
+    streams = json.loads(out.stdout).get("streams")
+    return streams[0]["codec_name"] if streams else None
+
+
 def get_keyframe_times(path):
     """Sorted list of keyframe timestamps - where a stream-copy cut's start actually lands."""
     out = subprocess.run(
@@ -392,6 +420,10 @@ class VideoPreview(QGraphicsView):
         # dropping it - only an explicit single-guide drag to 0 or a double-click reset
         # actually removes a guide.
         self.guide_active = {"left": False, "top": False, "right": False, "bottom": False}
+        # Snapshot of guide_active taken at the start of the current drag gesture - see
+        # _effective_ratio's `active` param for why _guide_dragged needs this instead of
+        # the live dict.
+        self._guide_active_at_drag_start = dict(self.guide_active)
         # Width/height of the selected aspect-ratio preset, or None for "None" - the
         # ratio a locked edit targets when one is set; otherwise a locked edit preserves
         # whatever ratio the box already has. See _effective_ratio and lock_aspect below.
@@ -818,13 +850,19 @@ class VideoPreview(QGraphicsView):
         box_h = self.video_height - top - bottom
         return (self.video_width - left - right) / box_h if box_h > 0 else None
 
-    def _effective_ratio(self, box_w0, box_h0):
+    def _effective_ratio(self, box_w0, box_h0, active=None):
         """The ratio a locked edit should target, or None if edits should be free right
         now: off when the Lock Aspect Ratio checkbox is off, when fewer than all four
         guides are engaged yet (nothing meaningful to lock until a real box exists - a
         single guide is just one edge, not a shape), a preset's ratio when one is
-        selected, otherwise whatever ratio the box already has (or None if it's empty)."""
-        if not self.lock_aspect or not all(self.guide_active.values()):
+        selected, otherwise whatever ratio the box already has (or None if it's empty).
+        `active` lets a caller pin the "all four engaged" check to a snapshot from
+        before the current gesture (see _guide_dragged) instead of the live, sticky
+        self.guide_active - otherwise dragging the 4th guide in would activate it (and
+        satisfy the all-four check) partway through its own drag, snapping the rest of
+        that same drag into a lock the user never asked for yet."""
+        active = self.guide_active if active is None else active
+        if not self.lock_aspect or not all(active.values()):
             return None
         if self.locked_ratio:
             return self.locked_ratio
@@ -922,7 +960,7 @@ class VideoPreview(QGraphicsView):
         left0, top0, right0, bottom0 = self._crop_at_drag_start
         box_w0 = self.video_width - left0 - right0
         box_h0 = self.video_height - top0 - bottom0
-        ratio = self._effective_ratio(box_w0, box_h0)
+        ratio = self._effective_ratio(box_w0, box_h0, active=self._guide_active_at_drag_start)
         if ratio:
             left, top, right, bottom = self._resize_locked(which, new_value, left0, top0, right0, bottom0, ratio)
             self._mark_active_sticky(left, top, right, bottom)
@@ -944,6 +982,7 @@ class VideoPreview(QGraphicsView):
 
     def _crop_move_start(self):
         self._crop_at_drag_start = self.crop
+        self._guide_active_at_drag_start = dict(self.guide_active)
 
     def _crop_moved(self, dx, dy):
         rect = self.content_rect()
@@ -1284,6 +1323,21 @@ FORMAT_PRESETS = {
                      ["-c:a", "aac", "-b:a", "192k"]),
     "MP4 (AV1)": (".mp4", ["-c:v", "libsvtav1", "-crf", "30", "-preset", "8"],
                    ["-c:a", "aac", "-b:a", "192k"]),
+}
+
+# Audio-only export formats - shown in format_combo instead of FORMAT_PRESETS
+# while "Audio only" is checked. "Original" keeps today's behavior (stream-
+# copy into a container matching the source codec, see AUDIO_CODEC_EXT/
+# probe_audio_codec; falls back to an AAC re-encode for an unrecognized
+# codec). Every other entry is (ext, audio codec args) and always re-encodes,
+# same rationale as FORMAT_PRESETS.
+AUDIO_FORMAT_PRESETS = {
+    "Original": None,
+    "M4A (AAC)": (".m4a", ["-c:a", "aac", "-b:a", "192k"]),
+    "MP3": (".mp3", ["-c:a", "libmp3lame", "-b:a", "192k"]),
+    "Opus": (".opus", ["-c:a", "libopus", "-b:a", "128k"]),
+    "FLAC": (".flac", ["-c:a", "flac"]),
+    "WAV": (".wav", ["-c:a", "pcm_s16le"]),
 }
 
 # Animated image formats - these don't fit FORMAT_PRESETS' plain codec-args
@@ -1694,7 +1748,7 @@ class MainWindow(QMainWindow):
         aspect_row = QVBoxLayout()
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItem("None")
-        self.aspect_combo.addItem("Current")
+        self.aspect_combo.addItem("Original")
         for label in ("16:9", "4:3", "1:1", "21:9", "4:5"):
             self.aspect_combo.addItem(label)
         self.aspect_combo.setEnabled(False)
@@ -1844,15 +1898,69 @@ class MainWindow(QMainWindow):
         export_tab_layout.setContentsMargins(8, 8, 8, 8)
         export_tab_layout.setSpacing(8)
 
+        # GIF/WebP never carry audio (build_ffmpeg_args always passes -an for
+        # them) - this whole section hides for those formats rather than
+        # sitting there having no effect.
+        self.audio_section_widget = QWidget()
+        audio_section_layout = QVBoxLayout(self.audio_section_widget)
+        audio_section_layout.setContentsMargins(0, 0, 0, 0)
+        audio_section_layout.addWidget(make_heading("Audio"))
+        audio_section_layout.addWidget(self.remove_audio)
+        audio_section_layout.addWidget(self.audio_only)
+        export_tab_layout.addWidget(self.audio_section_widget)
+        export_tab_layout.addWidget(make_separator())
+
+        # Scale doesn't apply to audio-only output, but the section stays in
+        # place and just greys out (see on_audio_only_toggled) rather than
+        # hiding - hiding it made the whole tab's layout jump every time the
+        # checkbox was toggled.
+        self.scale_section_widget = QWidget()
+        scale_section_layout = QVBoxLayout(self.scale_section_widget)
+        scale_section_layout.setContentsMargins(0, 0, 0, 0)
+        scale_section_layout.addWidget(make_heading("Scale"))
+        scale_row = QHBoxLayout()
+        self.scale_mode_combo = QComboBox()
+        self.scale_mode_combo.addItems(["Percentage", "Longest side"])
+        self.scale_mode_combo.currentTextChanged.connect(self.update_scale_default)
+        # Fixed to the widest item's width so the combo (and everything
+        # after it in the row) doesn't shift when switching selections.
+        combo_metrics = QFontMetrics(self.scale_mode_combo.font())
+        self.scale_mode_combo.setMinimumWidth(
+            combo_metrics.horizontalAdvance("Longest side") + 40)
+        scale_row.addWidget(self.scale_mode_combo)
+        self.scale_value_edit = ScrollAdjustLineEdit(minimum=1, maximum=1000, step=5, allow_blank=True)
+        scale_row.addWidget(self.scale_value_edit)
+        self.scale_unit_label = QLabel()
+        self.scale_unit_label.setForegroundRole(QPalette.PlaceholderText)
+        # Fixed to the wider of the two units ("px") so the label itself
+        # doesn't change the row's width switching between "%" and "px".
+        self.scale_unit_label.setFixedWidth(combo_metrics.horizontalAdvance("px") + 4)
+        scale_row.addWidget(self.scale_unit_label)
+        scale_section_layout.addLayout(scale_row)
+        # Establish the initial unit label/placeholder for the current
+        # ("Percentage") selection - currentTextChanged only fires on a
+        # later change.
+        self.update_scale_default()
+        scale_section_layout.addWidget(make_note(
+            "Resize the export. 100% keeps the source size."))
+        export_tab_layout.addWidget(self.scale_section_widget)
+        export_tab_layout.addWidget(make_separator())
+
+        # Format lives at the bottom of the tab, below Audio, so toggling
+        # "Audio only" can repopulate this same combo with audio container
+        # choices (see on_audio_only_toggled) instead of just disabling it -
+        # the two lists (VIDEO_FORMAT_ITEMS/AUDIO_FORMAT_PRESETS' keys) live
+        # in the same slot rather than side by side.
         export_tab_layout.addWidget(make_heading("Format"))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(list(FORMAT_PRESETS.keys()) + list(IMAGE_FORMAT_EXTS.keys()))
+        self.video_format_items = list(FORMAT_PRESETS.keys()) + list(IMAGE_FORMAT_EXTS.keys())
+        self.audio_format_items = list(AUDIO_FORMAT_PRESETS.keys())
+        self.format_combo.addItems(self.video_format_items)
         self.format_combo.currentTextChanged.connect(self.on_format_changed)
         export_tab_layout.addWidget(self.format_combo)
-        export_tab_layout.addWidget(make_note(
-            "Original: same container/codec as the source (fast, re-encodes only "
-            "when a crop or frame-accurate cut requires it). Any other choice "
-            "always re-encodes to that format. GIF/WebP exports never include audio."))
+        self.format_note = make_note(
+            "Original keeps the source format. Anything else re-encodes.")
+        export_tab_layout.addWidget(self.format_note)
 
         # GIF/WebP-only quality knobs - a lower frame rate and, for WebP, a
         # content-appropriate preset are the main levers for bringing an
@@ -1925,41 +2033,6 @@ class MainWindow(QMainWindow):
         image_options_grid.addWidget(self.gif_optimize_check, 6, 0, 1, 3)
         self.gif_optimize_row = (self.gif_optimize_check,)
         export_tab_layout.addWidget(self.image_options_widget)
-        export_tab_layout.addWidget(make_separator())
-
-        export_tab_layout.addWidget(make_heading("Scale"))
-        scale_row = QHBoxLayout()
-        self.scale_mode_combo = QComboBox()
-        self.scale_mode_combo.addItems(["Percentage", "Longest side"])
-        self.scale_mode_combo.currentTextChanged.connect(self.update_scale_default)
-        scale_row.addWidget(self.scale_mode_combo)
-        self.scale_value_edit = ScrollAdjustLineEdit(minimum=1, maximum=1000, step=5, allow_blank=True)
-        scale_row.addWidget(self.scale_value_edit)
-        self.scale_unit_label = QLabel()
-        self.scale_unit_label.setForegroundRole(QPalette.PlaceholderText)
-        scale_row.addWidget(self.scale_unit_label)
-        export_tab_layout.addLayout(scale_row)
-        # Establish the initial unit label/placeholder for the current
-        # ("Percentage") selection - currentTextChanged only fires on a
-        # later change.
-        self.update_scale_default()
-        export_tab_layout.addWidget(make_note(
-            "Applies to every format, including GIF/WebP where a 1080p source "
-            "would otherwise export at full resolution. Longest side scales by "
-            "whichever of width/height is larger, keeping the other proportional."))
-        export_tab_layout.addWidget(make_separator())
-
-        # GIF/WebP never carry audio (build_ffmpeg_args always passes -an for
-        # them) - this whole section hides for those formats rather than
-        # sitting there having no effect.
-        self.audio_section_widget = QWidget()
-        audio_section_layout = QVBoxLayout(self.audio_section_widget)
-        audio_section_layout.setContentsMargins(0, 0, 0, 0)
-        audio_section_layout.addWidget(make_heading("Audio"))
-        audio_section_layout.addWidget(self.remove_audio)
-        audio_section_layout.addWidget(self.audio_only)
-        export_tab_layout.addWidget(self.audio_section_widget)
-        export_tab_layout.addWidget(make_separator())
 
         # Establish initial widget visibility for the current ("Original")
         # selection - currentTextChanged only fires on a later change.
@@ -2389,7 +2462,7 @@ class MainWindow(QMainWindow):
         label = self.aspect_combo.currentText()
         if label == "None":
             return None
-        if label == "Current":
+        if label == "Original":
             # The video's own native ratio - applying it always crops to
             # (0,0,0,0) (nothing needs trimming, it already matches), but
             # locks that ratio so a corner-resize scales down within the same
@@ -2423,7 +2496,7 @@ class MainWindow(QMainWindow):
         vw, vh = self.video_width, self.video_height
         for i in range(1, self.aspect_combo.count()):
             label = self.aspect_combo.itemText(i)
-            if label == "Current":
+            if label == "Original":
                 continue  # not in "W:H" text form - always resolves to (0,0,0,0) anyway,
                 # already handled by the shortcut above
             num, _, den = label.partition(":")
@@ -2481,6 +2554,14 @@ class MainWindow(QMainWindow):
             # a (0,0,0,0) crop (the video already matches this ratio exactly).
             self.aspect_combo.setCurrentIndex(chosen_index)
             self.preview.set_locked_ratio(ratio)
+            # show_crop() already called set_crop_pixels() above, but with
+            # locked_ratio still None at that point (match_aspect_preset just
+            # reset the combo to "None" for this all-zero crop) - it computed
+            # guide_active as all-False. Now that locked_ratio is restored,
+            # redo it so all four guides render as engaged and the corner
+            # handles appear, letting a corner drag scale down within this
+            # ratio right away instead of the preset silently doing nothing.
+            self.preview.set_crop_pixels(left, top, right, bottom)
 
     def break_aspect_lock(self):
         """Drop the Preset dropdown back to None. Called whenever an edit went
@@ -2528,6 +2609,9 @@ class MainWindow(QMainWindow):
             self.crop_x_edit.clear()
             self.crop_y_edit.clear()
         self._syncing = was_syncing
+        # Longest side's default tracks the crop region, not just the
+        # source - keep it in sync every time the crop does.
+        self.update_scale_default()
 
     # --- trim fields <-> scrubber sync ---
 
@@ -3228,26 +3312,42 @@ class MainWindow(QMainWindow):
         set_row_visible(self.gif_grayscale_row, is_gif)
         set_row_visible(self.gif_optimize_row, is_gif)
 
+        if self.audio_only.isChecked():
+            self.format_note.setText(
+                "Original keeps the source audio untouched. Anything else re-encodes.")
+        else:
+            self.format_note.setText(
+                "Original keeps the source format. Anything else re-encodes.")
+
     def update_scale_default(self):
         """Keeps the Scale field's unit label, scroll-step range, and
         pre-filled value in sync with the current mode - percent defaults to
-        100 (a no-op scale), Longest side defaults to the source's actual
-        longest dimension, both editable in place rather than hidden behind
-        a generic "Original" placeholder. Called on mode change and on every
-        load/remove_file, since the sensible default differs per source."""
+        100 (a no-op scale), Longest side defaults to the *effective* (post-
+        crop, if any) longest dimension, both editable in place rather than
+        hidden behind a generic "Original" placeholder. Called on mode
+        change, on every load/remove_file, and on every crop change (via
+        update_crop_size_fields) - the sensible default differs per source
+        and shrinks with the crop, so it needs to track both."""
         is_percentage = self.scale_mode_combo.currentText() == "Percentage"
         self.scale_value_edit.minimum = 1 if is_percentage else 2
         self.scale_value_edit.maximum = 1000 if is_percentage else 7680
         self.scale_value_edit.step = 5 if is_percentage else 10
         self.scale_unit_label.setText("%" if is_percentage else "px")
+        # 100% is a sensible default with no file loaded too, unlike Longest
+        # side's default, which needs the source's actual dimensions.
+        if is_percentage:
+            self.scale_value_edit.setText("100")
+            return
         if not self.path:
             self.scale_value_edit.clear()
             self.scale_value_edit.setPlaceholderText("Original")
             return
-        if is_percentage:
-            self.scale_value_edit.setText("100")
-        else:
-            self.scale_value_edit.setText(str(max(self.video_width, self.video_height)))
+        try:
+            _left, _top, crop_w, crop_h, has_crop = self.get_crop()
+        except ValueError:
+            has_crop = False
+        width, height = (crop_w, crop_h) if has_crop else (self.video_width, self.video_height)
+        self.scale_value_edit.setText(str(max(width, height)))
 
     def on_lock_edges_toggled(self, locked):
         self.scrubber.set_edges_locked(locked)
@@ -3324,7 +3424,16 @@ class MainWindow(QMainWindow):
             self.remove_audio.setChecked(False)
         for widget in self.crop_edits:
             widget.setEnabled(not checked)
-        self.format_combo.setEnabled(not checked)
+        self.scale_section_widget.setEnabled(not checked)
+        # Swap Format's choices to the audio container list rather than
+        # disabling it - audio-only exports still have a real format
+        # decision (Original/M4A/MP3/Opus/FLAC/WAV), just not a video one.
+        items = self.audio_format_items if checked else self.video_format_items
+        self.format_combo.blockSignals(True)
+        self.format_combo.clear()
+        self.format_combo.addItems(items)
+        self.format_combo.blockSignals(False)
+        self.on_format_changed(self.format_combo.currentText())
 
     def read_frame_fields_seconds(self):
         if self.duration is None:
@@ -3479,7 +3588,11 @@ class MainWindow(QMainWindow):
 
     def export_ext(self):
         if self.audio_only.isChecked():
-            return ".m4a"
+            preset = AUDIO_FORMAT_PRESETS[self.format_combo.currentText()]
+            if preset is None:
+                codec = probe_audio_codec(self.path)
+                return AUDIO_CODEC_EXT.get(codec, ".m4a")
+            return preset[0]
         format_name = self.format_combo.currentText()
         if format_name in IMAGE_FORMAT_EXTS:
             return IMAGE_FORMAT_EXTS[format_name]
@@ -3496,7 +3609,15 @@ class MainWindow(QMainWindow):
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", str(self.path), "-ss", str(start), "-to", str(end)]
 
         if self.audio_only.isChecked():
-            cmd += ["-vn", "-c:a", "copy", str(out_path)]
+            preset = AUDIO_FORMAT_PRESETS[self.format_combo.currentText()]
+            if preset is not None:
+                cmd += ["-vn", *preset[1], str(out_path)]
+                return cmd, target_duration
+            codec = probe_audio_codec(self.path)
+            if codec in AUDIO_CODEC_EXT:
+                cmd += ["-vn", "-c:a", "copy", str(out_path)]
+            else:
+                cmd += ["-vn", "-c:a", "aac", "-b:a", "192k", str(out_path)]
             return cmd, target_duration
 
         format_name = self.format_combo.currentText()
@@ -3716,9 +3837,16 @@ class MainWindow(QMainWindow):
         text = QPlainTextEdit(self.error_details)
         text.setReadOnly(True)
         layout.addWidget(text)
+
+        footer = QHBoxLayout()
+        copy_button = QPushButton("Copy to Clipboard")
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.error_details))
+        footer.addWidget(copy_button)
+        footer.addStretch()
         close_button = QPushButton("Close")
         close_button.clicked.connect(dialog.close)
-        layout.addWidget(close_button)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
         dialog.exec()
 
     def cleanup_combined_tmp_dir(self):
