@@ -2,7 +2,6 @@
 """ClipCut: quick drag-and-drop trim/crop tool that preserves source mtime."""
 
 import bisect
-import json
 import os
 import shutil
 import subprocess
@@ -10,6 +9,12 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+# Mid-split bootstrap: the app is being incrementally moved into src/clipcut/
+# (see the migration plan) - this insert lets the still-mostly-intact
+# top-level script import the pieces that have already moved out. Removed
+# once this file itself becomes the thin launcher stub in the final step.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from PySide6.QtCore import QEvent, QRect, QSettings, QSize, Qt, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap
@@ -45,117 +50,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
-def probe(path):
-    out = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,avg_frame_rate:format=duration",
-            "-of", "json",
-            str(path),
-        ],
-        capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr.strip() or "ffprobe failed")
-    data = json.loads(out.stdout)
-    stream = data["streams"][0]
-    duration = float(data["format"]["duration"])
-    num, _, den = stream["avg_frame_rate"].partition("/")
-    fps = int(num) / int(den) if int(den or 0) else 30.0
-    return int(stream["width"]), int(stream["height"]), duration, fps
-
-
-AUDIO_CODEC_EXT = {
-    "opus": ".opus",
-    "vorbis": ".ogg",
-    "aac": ".m4a",
-    "alac": ".m4a",
-    "mp3": ".mp3",
-    "flac": ".flac",
-}
-
-
-def probe_audio_codec(path):
-    """Source audio codec name (e.g. 'opus', 'aac'), or None if no audio stream / probe failure."""
-    out = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=codec_name",
-            "-of", "json",
-            str(path),
-        ],
-        capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        return None
-    streams = json.loads(out.stdout).get("streams")
-    return streams[0]["codec_name"] if streams else None
-
-
-def get_keyframe_times(path):
-    """Sorted list of keyframe timestamps - where a stream-copy cut's start actually lands."""
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True,
-    )
-    times = []
-    for line in out.stdout.splitlines():
-        pts_time, _, flags = line.partition(",")
-        if flags.startswith("K"):
-            try:
-                times.append(float(pts_time))
-            except ValueError:
-                pass
-    times.sort()
-    return times
-
-
-def grab_thumbnail(path):
-    """Grab the first frame as a PNG (bytes), for players that fail to decode a preview."""
-    out = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
-        capture_output=True,
-    )
-    if out.returncode != 0 or not out.stdout:
-        return None
-    return out.stdout
-
-
-def next_available(path):
-    if not path.exists():
-        return path
-    n = 2
-    while True:
-        candidate = path.with_name(f"{path.stem}{n}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-        n += 1
-
-
-def parse_out_time_seconds(line):
-    """Parse an ffmpeg -progress 'out_time=HH:MM:SS.ffffff' line into seconds, or None."""
-    if not line.startswith("out_time="):
-        return None
-    h, m, s = line[len("out_time="):].split(":")
-    return int(h) * 3600 + int(m) * 60 + float(s)
-
-
-def seconds_to_hms(total_seconds):
-    total_seconds = max(0, int(round(total_seconds)))
-    h, rem = divmod(total_seconds, 3600)
-    m, s = divmod(rem, 60)
-    return h, m, s
-
-
-def format_time(seconds):
-    h, m, s = seconds_to_hms(seconds)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
+from clipcutlib.utils import (
+    probe, probe_audio_codec, get_keyframe_times, grab_thumbnail,
+    next_available, parse_out_time_seconds, seconds_to_hms, format_time,
+)
+from clipcutlib.constants import (
+    AUDIO_CODEC_EXT, FORMAT_PRESETS, AUDIO_FORMAT_PRESETS, IMAGE_FORMAT_EXTS,
+    WEBP_PRESETS, GIF_DITHER_MODES, GIFSICLE_PATH, BG_COLOR_CHOICES,
+    LINE_COLOR_CHOICES, LABEL_ROW_WIDTH,
+)
 
 
 def make_frame_row(label_text):
@@ -205,9 +108,6 @@ def make_crop_group(label_text, edit):
     h.addWidget(QLabel(label_text))
     h.addWidget(edit)
     return group
-
-
-LABEL_ROW_WIDTH = 80  # fixed label width so a column of label+combo rows all line up
 
 
 def make_label_row(label_text, widget):
@@ -1423,106 +1323,6 @@ class Scrubber(QWidget):
         self.position = new_start
         self.seek_requested.emit(new_start)
         self.update()
-
-
-# Export format presets - "Original" (None) keeps today's behavior exactly
-# (stream-copy when the cut allows it, libx264 re-encode otherwise, same
-# container as the source). Every other entry is (ext, video codec args,
-# audio codec args) and always re-encodes - picking a specific format is a
-# deliberate conversion, not something worth stream-copy-optimizing.
-FORMAT_PRESETS = {
-    "Original": None,
-    "MP4 (H.264)": (".mp4", ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"],
-                     ["-c:a", "aac", "-b:a", "192k"]),
-    "MP4 (H.265)": (".mp4", ["-c:v", "libx265", "-crf", "20", "-preset", "veryfast", "-tag:v", "hvc1"],
-                     ["-c:a", "aac", "-b:a", "192k"]),
-    "WebM (VP9)": (".webm", ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0"],
-                    ["-c:a", "libopus", "-b:a", "128k"]),
-    "MKV (H.264)": (".mkv", ["-c:v", "libx264", "-crf", "17", "-preset", "veryfast"],
-                     ["-c:a", "aac", "-b:a", "192k"]),
-    "MP4 (AV1)": (".mp4", ["-c:v", "libsvtav1", "-crf", "30", "-preset", "8"],
-                   ["-c:a", "aac", "-b:a", "192k"]),
-}
-
-# Audio-only export formats - shown in format_combo instead of FORMAT_PRESETS
-# while "Audio only" is checked. "Original" keeps today's behavior (stream-
-# copy into a container matching the source codec, see AUDIO_CODEC_EXT/
-# probe_audio_codec; falls back to an AAC re-encode for an unrecognized
-# codec). Every other entry is (ext, audio codec args) and always re-encodes,
-# same rationale as FORMAT_PRESETS.
-AUDIO_FORMAT_PRESETS = {
-    "Original": None,
-    "M4A (AAC)": (".m4a", ["-c:a", "aac", "-b:a", "192k"]),
-    "MP3": (".mp3", ["-c:a", "libmp3lame", "-b:a", "192k"]),
-    "Opus": (".opus", ["-c:a", "libopus", "-b:a", "128k"]),
-    "FLAC": (".flac", ["-c:a", "flac"]),
-    "WAV": (".wav", ["-c:a", "pcm_s16le"]),
-}
-
-# Animated image formats - these don't fit FORMAT_PRESETS' plain codec-args
-# shape (no audio track at all, and GIF needs a generated-palette filter
-# chain rather than a fixed codec, for quality reasons - straight -c:v gif
-# looks banded). Handled as their own branch in build_ffmpeg_args.
-IMAGE_FORMAT_EXTS = {
-    "GIF": ".gif",
-    "WebP (Animated)": ".webp",
-}
-
-# libwebp's content-type presets - the real "reduce blockiness" lever, since
-# ffmpeg's libwebp/libwebp_anim wrapper only exposes lossless/preset/quality
-# (no compression-effort/method option to tune, unlike the standalone cwebp
-# tool). Trimmed to the ones relevant to video-derived clips - "Indoor"
-# (libwebp's "picture") and "Outdoor" (libwebp's "photo") are relabeled for
-# clarity since that's the actual distinction between them; None/Icon/Text
-# were dropped as irrelevant to video content. "Default" is the default -
-# users can switch to Outdoor/Indoor/Drawing if blockiness shows up.
-WEBP_PRESETS = {
-    "Default": 0,
-    "Indoor": 1,
-    "Outdoor": 2,
-    "Drawing": 3,
-}
-
-# GIF-only: paletteuse's dithering mode. This is the single biggest lever
-# for GIF file size beyond fps/colors/scale - error-diffusion dithering
-# (Smooth) scatters different noise onto every frame, which is great for
-# gradients but defeats GIF's frame-to-frame LZW compression; ordered
-# dithering (Compact) is deterministic per-pixel-position so repeated/static
-# regions compress far better, and None skips dithering entirely (visible
-# color banding, but the smallest and most compressible output of the three).
-GIF_DITHER_MODES = {
-    "Smooth": "sierra2_4a",
-    "Compact": "bayer",
-    "None": "none",
-}
-
-# ffmpeg's gif encoder doesn't do real frame-to-frame delta compression at
-# all (verified: paletteuse's diff_mode=rectangle changes nothing about
-# output size, only its own internal processing speed) - every frame is
-# independently LZW-compressed. gifsicle's -O3 does the actual delta-frame
-# optimization Photoshop's "Save for Web" used to, which is what actually
-# closes the size gap; --lossy trades a little visual fidelity for a lot
-# more of it. Checked once at import time since it never changes mid-run.
-GIFSICLE_PATH = shutil.which("gifsicle")
-
-
-BG_COLOR_CHOICES = (
-    ("Black", QColor(0, 0, 0)),
-    ("White", QColor(255, 255, 255)),
-    ("Mid Grey", QColor(128, 128, 128)),
-)
-
-LINE_COLOR_CHOICES = (
-    ("Magenta", QColor(255, 0, 255)),
-    ("White", QColor(255, 255, 255)),
-    ("Black", QColor(0, 0, 0)),
-    ("Lime Green", QColor(0, 255, 0)),
-    ("Red", QColor(255, 0, 0)),
-    ("Blue", QColor(0, 0, 255)),
-    ("Cyan", QColor(0, 255, 255)),
-    ("Orange", QColor(255, 165, 0)),
-    ("Yellow", QColor(255, 255, 0)),
-)
 
 
 class ScrollAdjustLineEdit(QLineEdit):
