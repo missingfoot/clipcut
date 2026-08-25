@@ -273,28 +273,28 @@ def main():
           win.aspect_combo.currentText() == "4:3", win.aspect_combo.currentText())
     win.orient_horizontal.setChecked(True)  # restore for the rest of this section
 
-    # --- "Current" preset: the video's own native ratio, so a user can crop
+    # --- "Original" preset: the video's own native ratio, so a user can crop
     # to the file's existing shape (and then scale/resize within it) without
     # needing to know or pick whether it's 1:1, 16:9, 4:3, etc. Fixture is
     # 320x240 (exactly 4:3), so applying it crops to (0,0,0,0) - nothing needs
     # trimming, the video already matches its own ratio by definition. ---
-    current_index = win.aspect_combo.findText("Current")
+    current_index = win.aspect_combo.findText("Original")
     win.aspect_combo.setCurrentIndex(current_index)
     win.on_aspect_ratio_selected(current_index)
-    check("applying 'Current' crops to (0,0,0,0) - the video's own ratio needs no trimming",
+    check("applying 'Original' crops to (0,0,0,0) - the video's own ratio needs no trimming",
           win.cuts[1].crop == (0, 0, 0, 0), str(win.cuts[1].crop))
-    check("'Current' stays selected in the dropdown, not silently reverted to 'None'",
-          win.aspect_combo.currentText() == "Current", win.aspect_combo.currentText())
+    check("'Original' stays selected in the dropdown, not silently reverted to 'None'",
+          win.aspect_combo.currentText() == "Original", win.aspect_combo.currentText())
 
     win.orient_vertical.setChecked(True)
-    check("switching to Vertical with 'Current' engaged crops to fit the video's ratio in portrait",
+    check("switching to Vertical with 'Original' engaged crops to fit the video's ratio in portrait",
           win.cuts[1].crop is not None and win.cuts[1].crop != (0, 0, 0, 0),
           str(win.cuts[1].crop))
-    check("...and the dropdown still reads 'Current' after the flip",
-          win.aspect_combo.currentText() == "Current", win.aspect_combo.currentText())
+    check("...and the dropdown still reads 'Original' after the flip",
+          win.aspect_combo.currentText() == "Original", win.aspect_combo.currentText())
     win.orient_horizontal.setChecked(True)
 
-    check("'Current' is never reverse-matched onto an unrelated crop (match_aspect_preset skips it)",
+    check("'Original' is never reverse-matched onto an unrelated crop (match_aspect_preset skips it)",
           win.match_aspect_preset((20, 10, 20, 10)) != current_index)
 
     none_index = win.aspect_combo.findText("None")
@@ -554,7 +554,8 @@ def main():
         # mute_button starts muted (audio_output.setMuted(True) in
         # VideoPreview.__init__), so "Unmute" (not "Mute") is the correct
         # initial tooltip - matching the actual state, not a hardcoded guess.
-        (win.mute_button, "Unmute"), (win.actual_size_button, "100%"),
+        (win.mute_button, "Unmute"), (win.zoom_out_button, "Zoom Out"),
+        (win.zoom_fit_button, "Reset to Fit"), (win.zoom_in_button, "Zoom In"),
         (win.set_start_button, "Set Start"), (win.step_back_button, "Step Back"),
         (win.play_button, "Play"), (win.step_forward_button, "Step Forward"),
         (win.set_end_button, "Set End"),
@@ -584,11 +585,12 @@ def main():
     check("...and the tooltip matches too",
           win.mute_button.toolTip() == ("Unmute" if before_muted else "Mute"))
 
-    win.toggle_actual_size()
-    check("switching to actual size flips the zoom button's tooltip to 'Fit'",
-          win.actual_size_button.toolTip() == "Fit")
-    win.toggle_actual_size()
-    check("switching back flips it to '100%'", win.actual_size_button.toolTip() == "100%")
+    check("Fit button starts disabled - the view starts at Fit", not win.zoom_fit_button.isEnabled())
+    win.preview.zoom_in()
+    check("zooming in enables the Fit button (no longer at Fit)", win.zoom_fit_button.isEnabled())
+    win.preview.reset_zoom()
+    check("resetting zoom disables the Fit button again (back at Fit)",
+          not win.zoom_fit_button.isEnabled())
 
     win.on_playback_state_changed(clipcut.QMediaPlayer.PlayingState)
     check("playback starting flips the play button's tooltip to 'Pause'",
