@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QProcess, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QRect, QSettings, QSize, Qt, QProcess, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -1567,7 +1567,13 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_path=None):
         super().__init__()
         self.setWindowTitle("ClipCut")
-        self.resize(900, 600)
+        # Restore last session's size/position/maximized state if there is one
+        # (see closeEvent) - saveGeometry()/restoreGeometry() round-trip all of
+        # that together, not just width/height. Only a first-ever launch (or a
+        # cleared config) falls through to the hardcoded default.
+        geometry = QSettings().value("window_geometry")
+        if geometry is None or not self.restoreGeometry(geometry):
+            self.resize(1280, 800)
 
         self.path = None
         self.video_width = None
@@ -2286,6 +2292,10 @@ class MainWindow(QMainWindow):
 
         if initial_path:
             self.load_file(initial_path)
+
+    def closeEvent(self, event):
+        QSettings().setValue("window_geometry", self.saveGeometry())
+        super().closeEvent(event)
 
     def eventFilter(self, obj, event):
         if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space
@@ -4055,6 +4065,22 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    # Organization/application name give QSettings() a config file to write
+    # to (~/.config/clipcut/clipcut.conf) - without these it has nowhere
+    # sensible to store window_geometry between runs.
+    app.setOrganizationName("clipcut")
+    app.setApplicationName("clipcut")
+    # The installed package ships this as a themed icon (see PKGBUILD/
+    # clipcut.desktop); fromTheme finds it there. Running straight from a
+    # source checkout (no install step) falls back to the .png sitting next
+    # to this script instead, so the window/taskbar icon isn't blank in dev.
+    icon = QIcon.fromTheme("clipcut")
+    if icon.isNull():
+        local_icon = Path(__file__).resolve().parent / "clipcut.png"
+        if local_icon.exists():
+            icon = QIcon(str(local_icon))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     initial = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
     win = MainWindow(initial)
     win.show()

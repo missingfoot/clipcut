@@ -6,10 +6,12 @@ pkgdesc="Quick drag-and-drop video trim/crop tool that preserves the source's mo
 arch=('any')
 license=('MIT')
 depends=('pyside6' 'ffmpeg' 'gifsicle')
-source=('clipcut' 'clipcut.desktop')
-sha256sums=('SKIP' 'SKIP')
+source=('clipcut' 'clipcut.desktop' 'clipcut.png')
+sha256sums=('SKIP' 'SKIP' 'SKIP')
 
 package() {
     install -Dm755 "$srcdir/clipcut" "$pkgdir/usr/bin/clipcut"
     install -Dm644 "$srcdir/clipcut.desktop" "$pkgdir/usr/share/applications/clipcut.desktop"
+    install -Dm644 "$srcdir/clipcut.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/clipcut.png"
+    install -Dm644 "$srcdir/clipcut.png" "$pkgdir/usr/share/pixmaps/clipcut.png"
 }
