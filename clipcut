@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 # Mid-split bootstrap: the app is being incrementally moved into src/clipcut/
@@ -59,89 +58,12 @@ from clipcutlib.constants import (
     WEBP_PRESETS, GIF_DITHER_MODES, GIFSICLE_PATH, BG_COLOR_CHOICES,
     LINE_COLOR_CHOICES, LABEL_ROW_WIDTH,
 )
-
-
-def make_frame_row(label_text):
-    row = QHBoxLayout()
-    row.setContentsMargins(0, 0, 0, 0)
-    label = QLabel(label_text)
-    label.setFixedWidth(40)
-    row.addWidget(label)
-    frame_edit = NumberLineEdit()
-    # No placeholder text: blank means "not set" (start of file / end of file), and a
-    # "0" placeholder here would look identical to a real, deliberately-typed 0.
-    frame_edit.setMaximumWidth(60)
-    row.addWidget(frame_edit)
-    ref_label = QLabel("(0:00)")
-    ref_label.setStyleSheet("color: #999999;")
-    row.addWidget(ref_label)
-    row.addStretch()
-    return row, frame_edit, ref_label
-
-
-def make_heading(text):
-    label = QLabel(text)
-    font = label.font()
-    font.setBold(True)
-    label.setFont(font)
-    return label
-
-
-def make_separator():
-    line = QFrame()
-    line.setFrameShape(QFrame.HLine)
-    line.setFrameShadow(QFrame.Sunken)
-    return line
-
-
-def make_vseparator():
-    line = QFrame()
-    line.setFrameShape(QFrame.VLine)
-    line.setFrameShadow(QFrame.Sunken)
-    return line
-
-
-def make_crop_group(label_text, edit):
-    group = QWidget()
-    h = QHBoxLayout(group)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(QLabel(label_text))
-    h.addWidget(edit)
-    return group
-
-
-def make_label_row(label_text, widget):
-    row = QHBoxLayout()
-    label = QLabel(label_text)
-    label.setFixedWidth(LABEL_ROW_WIDTH)
-    row.addWidget(label)
-    row.addWidget(widget, stretch=1)
-    return row
-
-
-class NumberLineEdit(QLineEdit):
-    """A QLineEdit for a non-negative integer that scrolling increments/decrements:
-    1 per wheel notch, 10 per notch while Shift is held."""
-
-    def wheelEvent(self, event):
-        step = 10 if event.modifiers() & Qt.ShiftModifier else 1
-        direction = 1 if event.angleDelta().y() > 0 else -1
-        current = int(self.text() or self.placeholderText() or 0)
-        self.setText(str(max(0, current + step * direction)))
-        event.accept()
-
-
-@dataclass
-class Cut:
-    """One entry in the cut list. start_repr/end_repr are a keyframe index or a
-    frame number depending on frame_mode, matching how the Start/End fields
-    already represent time - see read_keyframe_fields_seconds/
-    read_frame_fields_seconds. end_repr=None means "through the end of the
-    file", the same blank-field convention the UI already uses."""
-    start_repr: int = 0
-    end_repr: int | None = None
-    frame_mode: bool = True
-    crop: tuple[int, int, int, int] | None = None
+from clipcutlib.small_widgets import NumberLineEdit, Cut, ScrollAdjustLineEdit
+from clipcutlib.ui_helpers import (
+    make_frame_row, make_heading, make_separator, make_vseparator,
+    make_crop_group, make_label_row, icon_button, new_sidebar_section,
+    sidebar_hr, make_note, image_option_row,
+)
 
 
 class GuideItem(QGraphicsRectItem):
@@ -1325,44 +1247,6 @@ class Scrubber(QWidget):
         self.update()
 
 
-class ScrollAdjustLineEdit(QLineEdit):
-    """A QLineEdit whose numeric value nudges up/down by `step` per mouse-
-    wheel notch, clamped to [minimum, maximum] - lets the GIF/WebP quality
-    knobs be tuned without needing a full spin box. If allow_blank, scrolling
-    below minimum clears the field back to blank ("Original") instead of
-    clamping there, so Frame rate can scroll all the way back off."""
-
-    def __init__(self, text="", minimum=0, maximum=100, step=1, allow_blank=False, parent=None):
-        super().__init__(text, parent)
-        self.minimum = minimum
-        self.maximum = maximum
-        self.step = step
-        self.allow_blank = allow_blank
-
-    def wheelEvent(self, event):
-        delta = self.step if event.angleDelta().y() > 0 else -self.step
-        text = self.text().strip()
-        if not text:
-            if delta < 0:
-                event.accept()
-                return
-            value = self.minimum
-        else:
-            try:
-                value = float(text) + delta
-            except ValueError:
-                event.ignore()
-                return
-        if self.allow_blank and value < self.minimum:
-            self.setText("")
-        else:
-            # Rounding first kills float noise from repeated fractional
-            # steps (e.g. 0.1 + 0.1 + 0.1 landing on 0.30000000000000004).
-            value = round(max(self.minimum, min(self.maximum, value)), 4)
-            self.setText(str(int(value)) if value == int(value) else str(value))
-        event.accept()
-
-
 class MainWindow(QMainWindow):
     def __init__(self, initial_path=None):
         super().__init__()
@@ -1418,15 +1302,6 @@ class MainWindow(QMainWindow):
         self.scrubber.segment_edited.connect(self.on_segment_edited)
         self.scrubber.stepped.connect(self.on_scrubber_stepped)
         below_preview.addWidget(self.scrubber)
-
-        def icon_button(icon_name, tooltip):
-            """Icon-only button - the label lives in the tooltip instead of on
-            the button face, matching every other control in this row."""
-            button = QPushButton()
-            button.setIcon(QIcon.fromTheme(icon_name))
-            button.setIconSize(QSize(16, 16))
-            button.setToolTip(tooltip)
-            return button
 
         controls_row = QHBoxLayout()
 
@@ -1537,17 +1412,7 @@ class MainWindow(QMainWindow):
         sidebar_widget.setLayout(sidebar_outer)
         sidebar_widget.setFixedWidth(280)
 
-        def new_sidebar_section():
-            section = QVBoxLayout()
-            section.setContentsMargins(12, 8, 12, 8)
-            section.setSpacing(8)
-            sidebar_outer.addLayout(section)
-            return section
-
-        def sidebar_hr():
-            sidebar_outer.addWidget(make_separator())
-
-        sidebar = new_sidebar_section()
+        sidebar = new_sidebar_section(sidebar_outer)
         sidebar.setContentsMargins(12, 12, 12, 12)
 
         self.filename_label = QLabel("Drag and drop or choose a file")
@@ -1569,13 +1434,6 @@ class MainWindow(QMainWindow):
         self.active_cut = 0
         self.shared_crop = (0, 0, 0, 0)
         self.per_cut_crop_enabled = False
-
-        def make_note(text):
-            note = QLabel(text)
-            note.setStyleSheet("color: #999999; font-size: 10px;")
-            note.setAlignment(Qt.AlignLeft)
-            note.setWordWrap(True)
-            return note
 
         # --- Cut tab (page 1 of the outer Cut/Crop/Audio tabs) ---
         start_kf_row, self.start_keyframe_edit, self.start_keyframe_ref = make_frame_row("Start:")
@@ -1920,37 +1778,20 @@ class MainWindow(QMainWindow):
         # box actually stretch out to the row's full width.
         image_options_grid.setColumnStretch(1, 1)
 
-        def image_option_row(row, label_text, field, unit_text, max_width=90):
-            label = QLabel(label_text)
-            image_options_grid.addWidget(label, row, 0)
-            if unit_text:
-                field.setMaximumWidth(max_width)
-                image_options_grid.addWidget(field, row, 1)
-                unit_label = QLabel(unit_text)
-                # QPalette.Mid (a 3D-bevel shading role, not text) is near-
-                # black in this theme and made the label unreadable -
-                # PlaceholderText is the actual "dim but legible" text role.
-                unit_label.setForegroundRole(QPalette.PlaceholderText)
-                image_options_grid.addWidget(unit_label, row, 2)
-                return (label, field, unit_label)
-            # No unit label (Preset) - span columns 1-2 and stretch full width.
-            image_options_grid.addWidget(field, row, 1, 1, 2)
-            return (label, field)
-
         self.image_fps_edit = ScrollAdjustLineEdit(minimum=1, maximum=120, step=1, allow_blank=True)
         self.image_fps_edit.setPlaceholderText("Original")
-        self.image_fps_row = image_option_row(0, "Frame rate", self.image_fps_edit, "fps")
+        self.image_fps_row = image_option_row(image_options_grid, 0, "Frame rate", self.image_fps_edit, "fps")
         self.webp_quality_edit = ScrollAdjustLineEdit("80", minimum=0, maximum=100, step=1)
-        self.webp_quality_row = image_option_row(1, "Quality", self.webp_quality_edit, "0-100")
+        self.webp_quality_row = image_option_row(image_options_grid, 1, "Quality", self.webp_quality_edit, "0-100")
         self.webp_preset_combo = QComboBox()
         self.webp_preset_combo.addItems(list(WEBP_PRESETS.keys()))
         self.webp_preset_combo.setCurrentText("Default")
-        self.webp_preset_row = image_option_row(2, "Preset", self.webp_preset_combo, "")
+        self.webp_preset_row = image_option_row(image_options_grid, 2, "Preset", self.webp_preset_combo, "")
         self.gif_colors_edit = ScrollAdjustLineEdit("256", minimum=2, maximum=256, step=8)
-        self.gif_colors_row = image_option_row(3, "Colors", self.gif_colors_edit, "2-256")
+        self.gif_colors_row = image_option_row(image_options_grid, 3, "Colors", self.gif_colors_edit, "2-256")
         self.gif_dither_combo = QComboBox()
         self.gif_dither_combo.addItems(list(GIF_DITHER_MODES.keys()))
-        self.gif_dither_row = image_option_row(4, "Dither", self.gif_dither_combo, "")
+        self.gif_dither_row = image_option_row(image_options_grid, 4, "Dither", self.gif_dither_combo, "")
         # Grayscale halves what the palette needs to represent (no hue/
         # chroma variation left at all) - a blunter, much easier-to-reason-
         # about version of the saturation slider this replaced.
@@ -2014,8 +1855,8 @@ class MainWindow(QMainWindow):
         self.section_tabs.addTab(export_tab_page, "Export")
         sidebar_outer.addWidget(self.section_tabs)
 
-        sidebar_hr()
-        sidebar = new_sidebar_section()
+        sidebar_hr(sidebar_outer)
+        sidebar = new_sidebar_section(sidebar_outer)
 
         self.remove_audio.toggled.connect(self.on_remove_audio_toggled)
         self.audio_only.toggled.connect(self.on_audio_only_toggled)
