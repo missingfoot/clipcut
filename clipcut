@@ -391,9 +391,19 @@ class VideoPreview(QGraphicsView):
     # is guaranteed to keep any active aspect-ratio lock intact - true for pan/locked
     # corner-scale, false for a single-guide drag/reset that can only break it)
     guides_changed = Signal(int, int, int, int, bool)
+    # Fires whenever zoom_factor/_zoom_pinned changes (zoom_in/out, reset_zoom, mouse
+    # wheel) - MainWindow listens to keep the % readout and button enabled-state in
+    # sync no matter which of those triggered the change.
+    zoom_changed = Signal()
 
     THICKNESS = 1
     PADDING = 24
+    # Round-number stops Zoom In/Out step through, rather than a flat multiplicative
+    # step - see zoom_steps(). MAX_ZOOM is the upper bound on zoom_factor, generous
+    # enough to inspect fine detail on a small source, independent of fit_scale().
+    # The lower bound isn't a constant: see min_zoom().
+    ZOOM_LEVELS = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
+    MAX_ZOOM = 8.0
 
     def __init__(self, on_drop, parent=None):
         super().__init__(parent)
@@ -433,7 +443,16 @@ class VideoPreview(QGraphicsView):
         # through _resize_locked to keep the box's ratio fixed; when off, every one of
         # them behaves as an independent free edit, exactly as if this feature didn't exist.
         self.lock_aspect = True
-        self.zoom_actual = False
+        # Pinned display scale, in native-pixel multiples (1.0 == 100%) - only
+        # meaningful once _zoom_pinned is True (see zoom_in/out/set_zoom). Until
+        # then, effective_zoom() tracks fit_scale() live instead of this, so "Fit"
+        # keeps recomputing itself as the window resizes (and, importantly, once
+        # the initial layout finishes settling right after startup - fit_scale()
+        # right at construction, before the window is shown, would otherwise get
+        # pinned to a bogus size forever). reset_zoom() drops back to this
+        # tracking mode; any explicit zoom_in/out/set_zoom pins it.
+        self.zoom_factor = 1.0
+        self._zoom_pinned = False
         self.pan_x = 0.0
         self.pan_y = 0.0
         self._panning = False
@@ -532,7 +551,7 @@ class VideoPreview(QGraphicsView):
         self.refresh_overlay()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MiddleButton and self.zoom_actual:
+        if event.button() == Qt.MiddleButton and self._content_overflows():
             self._panning = True
             self._pan_last_pos = event.position().toPoint()
             # Cursor lives on the viewport widget, not the QGraphicsView itself.
@@ -553,23 +572,35 @@ class VideoPreview(QGraphicsView):
             return
         super().mouseMoveEvent(event)
 
+    def _content_overflows(self):
+        """Whether the current zoom makes the displayed frame bigger than the viewport
+        on at least one axis - the condition for panning to mean anything at all."""
+        if not self.video_width or not self.video_height:
+            return False
+        rect = self.viewport().rect()
+        disp_w = self.video_width * self.effective_zoom()
+        disp_h = self.video_height * self.effective_zoom()
+        return disp_w > rect.width() or disp_h > rect.height()
+
     def _clamp_pan(self):
         """Keep pan_x/pan_y within range so the video always fully covers the viewport
         (or stays centered, if it's smaller than the viewport on that axis) - without this,
         dragging past an edge would let the offset run away and require an equal drag back
         before the view visibly moves again."""
-        if not self.video_width or not self.video_height or not self.zoom_actual:
+        if not self.video_width or not self.video_height:
             return
         rect = self.viewport().rect()
-        base_x = (rect.width() - self.video_width) // 2
-        base_y = (rect.height() - self.video_height) // 2
-        if self.video_width > rect.width():
-            lo, hi = (rect.width() - self.video_width) - base_x, -base_x
+        disp_w = self.video_width * self.effective_zoom()
+        disp_h = self.video_height * self.effective_zoom()
+        base_x = (rect.width() - disp_w) / 2
+        base_y = (rect.height() - disp_h) / 2
+        if disp_w > rect.width():
+            lo, hi = (rect.width() - disp_w) - base_x, -base_x
             self.pan_x = max(lo, min(hi, self.pan_x))
         else:
             self.pan_x = 0.0
-        if self.video_height > rect.height():
-            lo, hi = (rect.height() - self.video_height) - base_y, -base_y
+        if disp_h > rect.height():
+            lo, hi = (rect.height() - disp_h) - base_y, -base_y
             self.pan_y = max(lo, min(hi, self.pan_y))
         else:
             self.pan_y = 0.0
@@ -587,13 +618,19 @@ class VideoPreview(QGraphicsView):
         actually panning (middle button held), not as an always-on hover hint."""
         self.viewport().unsetCursor()
 
+    def wheelEvent(self, event):
+        if self.video_width and self.video_height:
+            (self.zoom_in if event.angleDelta().y() > 0 else self.zoom_out)(anchor=event.position())
+        event.accept()
+
     def load(self, path, video_width, video_height):
         self.video_width = video_width
         self.video_height = video_height
         self.crop = (0, 0, 0, 0)
         self.guide_active = {"left": False, "top": False, "right": False, "bottom": False}
         self.locked_ratio = None
-        self.zoom_actual = False
+        self.zoom_factor = 1.0
+        self._zoom_pinned = False
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.hint_item.hide()
@@ -623,7 +660,8 @@ class VideoPreview(QGraphicsView):
         self.crop = (0, 0, 0, 0)
         self.guide_active = {"left": False, "top": False, "right": False, "bottom": False}
         self.locked_ratio = None
-        self.zoom_actual = False
+        self.zoom_factor = 1.0
+        self._zoom_pinned = False
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.player.stop()
@@ -650,45 +688,126 @@ class VideoPreview(QGraphicsView):
         self.fallback_item.show()
         self.refresh_overlay()
 
+    def fit_scale(self):
+        """The zoom_factor that fits the whole frame within the padded viewport - the
+        scale "Fit" means. Independent of the current zoom_factor, so it stays valid to
+        compare against (min_zoom, the % readout's "Fit" label) no matter how zoomed in
+        or out the view actually is right now."""
+        if not self.video_width or not self.video_height:
+            return 1.0
+        rect = self.viewport().rect()
+        w = max(1, rect.width() - 2 * self.PADDING)
+        h = max(1, rect.height() - 2 * self.PADDING)
+        return min(w / self.video_width, h / self.video_height)
+
+    def min_zoom(self):
+        """Zoom-out floor: whichever of Fit or 100% is *less* zoomed-in. A large source
+        floors at Fit (no point shrinking past seeing the whole frame); a source already
+        smaller than the viewport floors at 100% (Fit would be upscaling it, and zooming
+        out from there would only shrink it further into the corner - never useful)."""
+        return min(self.fit_scale(), 1.0)
+
+    def max_zoom(self):
+        return max(self.MAX_ZOOM, self.fit_scale())
+
+    def effective_zoom(self):
+        """The scale actually in effect right now: fit_scale(), tracked live, until an
+        explicit zoom pins a specific number (see _zoom_pinned)."""
+        return self.zoom_factor if self._zoom_pinned else self.fit_scale()
+
+    def zoom_steps(self):
+        """The stops Zoom In/Out click through: ZOOM_LEVELS' round percentages that
+        fall within [min_zoom, max_zoom], plus the exact floor and ceiling themselves
+        (which usually aren't round numbers - e.g. a source whose Fit is 137%) so
+        zooming never overshoots past them into an out-of-range value."""
+        lo, hi = self.min_zoom(), self.max_zoom()
+        levels = {lo, hi} | {lvl for lvl in self.ZOOM_LEVELS if lo <= lvl <= hi}
+        return sorted(levels)
+
+    def _next_zoom_level(self, up):
+        """The next zoom_steps() stop above (up=True) or below the current effective
+        zoom, or None if already at the end of the ladder in that direction."""
+        current = self.effective_zoom()
+        steps = self.zoom_steps() if up else reversed(self.zoom_steps())
+        for level in steps:
+            if (level > current + 0.005) if up else (level < current - 0.005):
+                return level
+        return None
+
+    def zoom_in(self, anchor=None):
+        level = self._next_zoom_level(up=True)
+        if level is not None:
+            self.set_zoom(level, anchor)
+
+    def zoom_out(self, anchor=None):
+        level = self._next_zoom_level(up=False)
+        if level is not None:
+            self.set_zoom(level, anchor)
+
+    def reset_zoom(self):
+        """Drop back to Fit, tracked live - not just a one-time snap to today's
+        fit_scale(), which would go stale the next time the window resizes."""
+        self._zoom_pinned = False
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._update_pan_cursor()
+        self.refresh_overlay()
+        self.zoom_changed.emit()
+
+    def set_zoom(self, factor, anchor=None):
+        """Change zoom_factor to `factor`, clamped to [min_zoom, max_zoom]. With no
+        anchor (button clicks), pan resets to center like today. With an anchor - a
+        QPointF in viewport coordinates, e.g. the cursor position on a wheel-zoom -
+        pan is instead solved so whatever video-content point was under the anchor
+        stays under it, rather than the view recentering under the cursor."""
+        old_rect = self.content_rect()
+        frac = None
+        if anchor is not None and old_rect.width() > 0 and old_rect.height() > 0:
+            frac = ((anchor.x() - old_rect.x()) / old_rect.width(),
+                    (anchor.y() - old_rect.y()) / old_rect.height())
+
+        self.zoom_factor = max(self.min_zoom(), min(self.max_zoom(), factor))
+        self._zoom_pinned = True
+
+        if frac is not None:
+            rect = self.viewport().rect()
+            disp_w = max(1, round(self.video_width * self.zoom_factor))
+            disp_h = max(1, round(self.video_height * self.zoom_factor))
+            base_x = (rect.width() - disp_w) / 2
+            base_y = (rect.height() - disp_h) / 2
+            self.pan_x = (anchor.x() - frac[0] * disp_w) - base_x
+            self.pan_y = (anchor.y() - frac[1] * disp_h) - base_y
+            self._clamp_pan()
+        else:
+            self.pan_x = 0.0
+            self.pan_y = 0.0
+
+        self._update_pan_cursor()
+        self.refresh_overlay()
+        self.zoom_changed.emit()
+
     def content_rect(self):
         """Where the video frame is actually drawn within the view (letterbox/pillarbox-aware),
         inset by PADDING so crop=0 guides land clear of the video/window edge and stay grabbable."""
         rect = self.viewport().rect()
         if not self.video_width or not self.video_height:
             return QRect(0, 0, rect.width(), rect.height())
-        if self.zoom_actual:
-            disp_w, disp_h = self.video_width, self.video_height
-        else:
-            w = max(1, rect.width() - 2 * self.PADDING)
-            h = max(1, rect.height() - 2 * self.PADDING)
-            video_aspect = self.video_width / self.video_height
-            widget_aspect = w / h
-            if widget_aspect > video_aspect:
-                disp_h = h
-                disp_w = int(h * video_aspect)
-            else:
-                disp_w = w
-                disp_h = int(w / video_aspect)
-        base_x = (rect.width() - disp_w) // 2
-        base_y = (rect.height() - disp_h) // 2
-        if self.zoom_actual and disp_w > rect.width():
+        zoom = self.effective_zoom()
+        disp_w = max(1, round(self.video_width * zoom))
+        disp_h = max(1, round(self.video_height * zoom))
+        base_x = (rect.width() - disp_w) / 2
+        base_y = (rect.height() - disp_h) / 2
+        if disp_w > rect.width():
             lo, hi = rect.width() - disp_w, 0
-            x = max(lo, min(hi, base_x + int(self.pan_x)))
+            x = max(lo, min(hi, base_x + self.pan_x))
         else:
             x = base_x
-        if self.zoom_actual and disp_h > rect.height():
+        if disp_h > rect.height():
             lo, hi = rect.height() - disp_h, 0
-            y = max(lo, min(hi, base_y + int(self.pan_y)))
+            y = max(lo, min(hi, base_y + self.pan_y))
         else:
             y = base_y
-        return QRect(x, y, disp_w, disp_h)
-
-    def set_zoom_actual(self, actual):
-        self.zoom_actual = actual
-        self.pan_x = 0.0
-        self.pan_y = 0.0
-        self._update_pan_cursor()
-        self.refresh_overlay()
+        return QRect(int(x), int(y), disp_w, disp_h)
 
     def set_crop_pixels(self, left, top, right, bottom):
         self.crop = (left, top, right, bottom)
@@ -1478,6 +1597,7 @@ class MainWindow(QMainWindow):
         left.setSpacing(0)
         self.preview = VideoPreview(self.load_file)
         self.preview.guides_changed.connect(self.on_guides_changed)
+        self.preview.zoom_changed.connect(self.update_zoom_buttons)
         left.addWidget(self.preview, stretch=1)
 
         left.addWidget(make_separator())
@@ -1517,10 +1637,20 @@ class MainWindow(QMainWindow):
         self.mute_button.setEnabled(False)
         controls_row.addWidget(self.mute_button)
 
-        self.actual_size_button = icon_button("zoom-in-symbolic", "100%")
-        self.actual_size_button.clicked.connect(self.toggle_actual_size)
-        self.actual_size_button.setEnabled(False)
-        controls_row.addWidget(self.actual_size_button)
+        self.zoom_out_button = icon_button("zoom-out-symbolic", "Zoom Out")
+        self.zoom_out_button.clicked.connect(lambda: self.preview.zoom_out())
+        self.zoom_out_button.setEnabled(False)
+        controls_row.addWidget(self.zoom_out_button)
+
+        self.zoom_fit_button = icon_button("view-zoom-fit-symbolic", "Reset to Fit")
+        self.zoom_fit_button.clicked.connect(self.preview.reset_zoom)
+        self.zoom_fit_button.setEnabled(False)
+        controls_row.addWidget(self.zoom_fit_button)
+
+        self.zoom_in_button = icon_button("zoom-in-symbolic", "Zoom In")
+        self.zoom_in_button.clicked.connect(lambda: self.preview.zoom_in())
+        self.zoom_in_button.setEnabled(False)
+        controls_row.addWidget(self.zoom_in_button)
 
         # Off by default (matches today's drag-to-resize behavior) - turning
         # it on protects against accidentally dragging a cut's start/end
@@ -2130,7 +2260,8 @@ class MainWindow(QMainWindow):
             self.show_center_check, self.show_thirds_check, self.lock_aspect_check,
             self.crop_style_combo, self.bg_color_combo, self.line_color_combo,
             self.process_button, self.play_button, self.step_back_button,
-            self.step_forward_button, self.mute_button, self.actual_size_button,
+            self.step_forward_button, self.mute_button,
+            self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button,
             self.lock_edges_button, self.loop_button, self.snap_button,
             self.remove_file_button, self.set_start_button, self.set_end_button,
             self.detect_scenes_button,
@@ -2242,12 +2373,11 @@ class MainWindow(QMainWindow):
         self.crop_width_edit.setPlaceholderText(str(w))
         self.crop_height_edit.setPlaceholderText(str(h))
         self.set_file_dependent_widgets_enabled(True)
-        self.actual_size_button.setIcon(QIcon.fromTheme("zoom-in-symbolic"))
-        self.actual_size_button.setToolTip("100%")
         self.status.setText("")
         self.update_suffix_placeholder()
 
         self.preview.load(path, w, h)
+        self.update_zoom_buttons()
         self.scrubber.set_duration(duration)
         self.scrubber.set_keyframes([] if self.frame_mode else self.keyframe_times)
         self.time_label.setText(f"0:00 / {format_time(duration)}")
@@ -2291,13 +2421,12 @@ class MainWindow(QMainWindow):
         self.aspect_combo.setCurrentIndex(0)
         self.orient_horizontal.setChecked(True)
         self.set_file_dependent_widgets_enabled(False)
-        self.actual_size_button.setIcon(QIcon.fromTheme("zoom-in-symbolic"))
-        self.actual_size_button.setToolTip("100%")
         self.status.setText("")
         self.update_suffix_placeholder()
         self.update_combined_export_availability()
 
         self.preview.unload()
+        self.update_zoom_buttons()
         self.scrubber.set_duration(0)
         self.refresh_timeline_cuts()
         self.scrubber.set_keyframes([])
@@ -3284,14 +3413,17 @@ class MainWindow(QMainWindow):
         self.mute_button.setIcon(QIcon.fromTheme(icon))
         self.mute_button.setToolTip("Unmute" if muted else "Mute")
 
-    def toggle_actual_size(self):
-        """Toggle the preview between scaled-to-fit and native pixel size; the window
-        and sidebar are untouched, only how the video renders within the preview panel."""
-        actual = not self.preview.zoom_actual
-        self.preview.set_zoom_actual(actual)
-        icon = "view-zoom-fit-symbolic" if actual else "zoom-in-symbolic"
-        self.actual_size_button.setIcon(QIcon.fromTheme(icon))
-        self.actual_size_button.setToolTip("Fit" if actual else "100%")
+    def update_zoom_buttons(self):
+        """Keep the Zoom In/Out/Fit buttons' enabled state in sync with the preview's
+        current zoom_factor - connected to VideoPreview.zoom_changed, so this fires
+        no matter which of zoom_in/out/reset/wheel triggered it, plus load and
+        remove_file (see VideoPreview.min_zoom/max_zoom/fit_scale for the bounds)."""
+        if not self.path:
+            return
+        zoom = self.preview.effective_zoom()
+        self.zoom_out_button.setEnabled(zoom > self.preview.min_zoom() + 0.005)
+        self.zoom_in_button.setEnabled(zoom < self.preview.max_zoom() - 0.005)
+        self.zoom_fit_button.setEnabled(abs(zoom - self.preview.fit_scale()) > 0.005)
 
     def on_format_changed(self, format_name):
         is_gif = format_name == "GIF"
